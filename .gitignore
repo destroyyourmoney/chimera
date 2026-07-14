@@ -1,0 +1,37 @@
+# Go build cache/tooling (scripts/build.sh, build.ps1 point GOCACHE/GOMODCACHE here)
+.gocache/
+.gomodcache/
+.gopath/
+
+# Go build outputs (scripts/build.sh, build.ps1 produce these)
+/bin/
+/chimera.exe
+
+# desktop/cffi generates these next to main.go via
+# `go build -buildmode=c-archive|c-shared` (see its doc comment)
+desktop/cffi/chimera.a
+desktop/cffi/chimera.h
+desktop/cffi/chimera.lib
+desktop/cffi/chimera.dll
+
+# chimera.dll/.exe/.h copied next to the Flutter Windows runner so `flutter
+# run`/dart:ffi can find them at dev time (see scripts/build-app-windows.ps1);
+# regenerated from desktop/cffi + cmd/chimera, not source.
+app/windows/chimera.dll
+app/windows/chimera.exe
+app/windows/chimera.h
+
+# Full `flutter build windows` output tree accidentally left at repo root --
+# the real Flutter project lives in app/; this is a disposable build product.
+/chimera_tray/
+
+.claude/
+
+# Internal engineering status/roadmap notes -- not for the public repo.
+/ROADMAP.md
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
