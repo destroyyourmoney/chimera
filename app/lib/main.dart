@@ -105,6 +105,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   bool _loaded = false;
 
   _TrayIcon? _currentTrayIcon;
+  DateTime? _lastBlurHideAt;
   DateTime? _lastPollTime;
   int _lastBytesUp = 0;
   int _lastBytesDown = 0;
@@ -465,9 +466,23 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Future<void> _toggleWindow() async {
     if (await windowManager.isVisible()) {
       await windowManager.hide();
-    } else {
-      await _showAtTray();
+      return;
     }
+    // A click on the tray icon while the popover is open first steals native
+    // focus -- onWindowBlur() fires and hides the window -- and only then
+    // delivers this same click as onTrayIconMouseDown(). Without this guard,
+    // isVisible() above would already read false (blur got there first) and
+    // this click would immediately re-show the window it was meant to
+    // close. Absorb any toggle that follows a blur-hide within one click's
+    // worth of time as "that was the close", not "now open it again".
+    final blurredAt = _lastBlurHideAt;
+    final sinceBlur = blurredAt == null
+        ? null
+        : DateTime.now().difference(blurredAt);
+    if (sinceBlur != null && sinceBlur < const Duration(milliseconds: 400)) {
+      return;
+    }
+    await _showAtTray();
   }
 
   /// Anchors the popover just above (or, if the taskbar isn't at the
@@ -552,6 +567,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   void onWindowBlur() async {
     // Clicking away from the popover closes it, matching the tray-flyout
     // convention (Mullvad, Windows volume/network flyouts, etc.).
+    _lastBlurHideAt = DateTime.now();
     await windowManager.hide();
   }
 

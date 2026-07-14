@@ -15,6 +15,20 @@ import 'package:flutter/material.dart';
 import 'chimera_bindings.dart';
 import 'server_form.dart';
 
+/// _deployServerInIsolate is a top-level function, not a closure -- required
+/// so Isolate.spawn's entry point is "sendable". A closure declared inside
+/// _ServerDeployPageState (even one that only textually reads a local
+/// String) can end up capturing the whole State's context, including
+/// TextEditingControllers and Flutter binding objects, which are not
+/// sendable and make the isolate call fail at runtime with "object is
+/// unsendable". Mirrors _startSocksInIsolate in chimera_service.dart.
+void _deployServerInIsolate(List<Object> args) {
+  final specJson = args[0] as String;
+  final sendPort = args[1] as SendPort;
+  final bindings = ChimeraBindings.open();
+  sendPort.send(bindings.deployServer(specJson));
+}
+
 class ServerDeployPage extends StatefulWidget {
   const ServerDeployPage({super.key});
 
@@ -71,11 +85,18 @@ class _ServerDeployPageState extends State<ServerDeployPage> {
 
     try {
       // deployServer blocks for the whole install (Docker + image build can
-      // take minutes) -- Isolate.run keeps the UI responsive and satisfies
-      // ChimeraNativeApi.deployServer's "background isolate only" contract.
-      final resultJson = await Isolate.run(
-        () => ChimeraBindings.open().deployServer(spec),
-      );
+      // take minutes) -- spawning a background isolate keeps the UI
+      // responsive and satisfies ChimeraNativeApi.deployServer's
+      // "background isolate only" contract. Only the spec String and a
+      // SendPort cross the isolate boundary; see _deployServerInIsolate's
+      // doc comment for why this can't be a plain closure.
+      final receivePort = ReceivePort();
+      await Isolate.spawn(_deployServerInIsolate, [
+        spec,
+        receivePort.sendPort,
+      ]);
+      final resultJson = await receivePort.first as String;
+      receivePort.close();
       final env = jsonDecode(resultJson) as Map<String, dynamic>;
       final err = env['error'] as String? ?? '';
       if (err.isNotEmpty) {

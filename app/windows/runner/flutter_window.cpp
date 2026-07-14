@@ -27,13 +27,13 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
-  flutter_controller_->engine()->SetNextFrameCallback([&]() {
-    this->Show();
-  });
-
-  // Flutter can complete the first frame before the "show window" callback is
-  // registered. The following call ensures a frame is pending to ensure the
-  // window is shown. It is a no-op if the first frame hasn't completed yet.
+  // Deliberately no SetNextFrameCallback(Show) here: this app is a
+  // Mullvad-style tray popover, and window_manager's Dart-side hide()/show()
+  // (main.dart) owns visibility from here on. Auto-showing the native window
+  // on first frame raced with that -- Dart's hide() runs after the Flutter
+  // engine boots, so the window flashed visible at main.cpp's hardcoded
+  // origin/size for a frame or two on every launch before window_manager
+  // ever got a chance to hide or reposition it.
   flutter_controller_->ForceRedraw();
 
   return true;

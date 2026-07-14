@@ -30,7 +30,7 @@ const (
 	defaultStealHost    = "www.microsoft.com:443"
 	defaultServerPort   = 443
 	defaultShortIDCount = 1
-	defaultRepo         = "https://github.com/your-org/chimera.git"
+	defaultRepo         = "https://github.com/destroyyourmoney/chimera.git"
 	defaultRef          = "main"
 	defaultImage        = "chimera-server:latest"
 	defaultContainer    = "chimera-server"
