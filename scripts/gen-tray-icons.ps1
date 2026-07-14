@@ -1,87 +1,177 @@
-# Regenerates the CHIMERA tray-state icons (connected/disconnected/error) as
-# real 32x32 ARGB .ico files, colored from the app's design tokens
-# (app/lib/theme.dart). Run after changing tray state colors; output lands in
-# app/assets/icons/, which is bundled as a Flutter asset (see pubspec.yaml)
-# and resolved at runtime relative to the executable -- NOT copied from
-# windows/runner/resources, which is source-tree-only and absent from any
-# built app/data/flutter_assets output.
+# Regenerates app_icon.ico (chimera_tray.exe's own icon) and the three
+# tray-state icons (connected/disconnected/error) from the single master
+# mark at app/assets/icons/source/chimera_mark.png -- a white silhouette on
+# a solid dark background (see that file's own generation prompt in
+# ROADMAP.md/commit history if it ever needs regenerating from scratch).
 #
-# Icons are packed as a single PNG-format frame inside a hand-built ICO
-# container (valid on Vista+) instead of via Bitmap.GetHicon(), which routes
-# through legacy GDI and quantizes true-color ARGB down to a reduced system
-# palette -- that quantization is what produced banded/wrong colors on the
-# first attempt.
+# The tray-state icons are NOT flat dots anymore: each is the same chimera
+# silhouette recolored per connection state, with alpha derived from the
+# source's luminance (background -> transparent, white shape -> opaque),
+# so they composite cleanly onto any taskbar color. Run this after changing
+# tray state colors or replacing the source mark; output lands in
+# app/assets/icons/ (bundled as a Flutter asset, resolved at runtime
+# relative to the executable) and app/windows/runner/resources/app_icon.ico
+# (the exe/taskbar icon, embedded into chimera_tray.exe at build time).
 Add-Type -AssemblyName System.Drawing
 
-function New-DotIcon {
+$repoRoot = "d:\Projects\projects_macbook\chimera_protocol"
+$sourcePath = "$repoRoot\app\assets\icons\source\chimera_mark.png"
+
+# Sampled from the source art: background ~(35,33,34), lion shape ~(253,253,251).
+# Luminance between these two anchors is remapped to alpha 0..255, which
+# also preserves the source's antialiasing at the shape's edges instead of a
+# hard-edged cutout.
+$bgLum = 34.0
+$fgLum = 253.0
+
+# Recolors $src (loaded once, kept in ARGB32) into a same-size bitmap where
+# RGB = $HexColor and alpha comes from source luminance as described above.
+function ConvertTo-ColoredMask {
     param(
-        [string]$Path,
-        [string]$HexColor,
-        [string]$HexRim
+        [System.Drawing.Bitmap]$Src,
+        [string]$HexColor
     )
-    $size = 32
-    $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.Clear([System.Drawing.Color]::Transparent)
+    $color = [System.Drawing.ColorTranslator]::FromHtml($HexColor)
+    $w = $Src.Width
+    $h = $Src.Height
+    $out = New-Object System.Drawing.Bitmap $w, $h, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 
-    $fill = [System.Drawing.ColorTranslator]::FromHtml($HexColor)
-    $rim = [System.Drawing.ColorTranslator]::FromHtml($HexRim)
+    $srcData = $Src.LockBits(
+        (New-Object System.Drawing.Rectangle 0, 0, $w, $h),
+        [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $outData = $out.LockBits(
+        (New-Object System.Drawing.Rectangle 0, 0, $w, $h),
+        [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 
-    [float]$margin = 3.5
-    [float]$rectSize = $size - (2.0 * $margin)
-    $rect = New-Object System.Drawing.RectangleF -ArgumentList $margin, $margin, $rectSize, $rectSize
+    $stride = $srcData.Stride
+    $bytes = $stride * $h
+    $srcBuf = New-Object byte[] $bytes
+    [System.Runtime.InteropServices.Marshal]::Copy($srcData.Scan0, $srcBuf, 0, $bytes)
+    $outBuf = New-Object byte[] $bytes
 
-    $rimPen = New-Object System.Drawing.Pen -ArgumentList $rim, ([float]1.6)
-    $g.DrawEllipse($rimPen, $rect)
+    $range = $fgLum - $bgLum
+    for ($i = 0; $i -lt $bytes; $i += 4) {
+        # BGRA byte order in memory for Format32bppArgb.
+        $b = $srcBuf[$i]; $g = $srcBuf[$i + 1]; $r = $srcBuf[$i + 2]
+        $lum = ($r + $g + $b) / 3.0
+        $a = [Math]::Round((($lum - $bgLum) / $range) * 255.0)
+        if ($a -lt 0) { $a = 0 }; if ($a -gt 255) { $a = 255 }
+        $outBuf[$i]     = $color.B
+        $outBuf[$i + 1] = $color.G
+        $outBuf[$i + 2] = $color.R
+        $outBuf[$i + 3] = [byte]$a
+    }
 
-    [float]$inset = 2.0
-    [float]$innerX = $rect.X + $inset
-    [float]$innerY = $rect.Y + $inset
-    [float]$innerSize = $rect.Width - (2.0 * $inset)
-    $innerRect = New-Object System.Drawing.RectangleF -ArgumentList $innerX, $innerY, $innerSize, $innerSize
-    $brush = New-Object System.Drawing.SolidBrush -ArgumentList $fill
-    $g.FillEllipse($brush, $innerRect)
+    [System.Runtime.InteropServices.Marshal]::Copy($outBuf, 0, $outData.Scan0, $bytes)
+    $Src.UnlockBits($srcData)
+    $out.UnlockBits($outData)
+    return $out
+}
+
+# High-quality downscale with premultiplied alpha (avoids the dark halo you
+# get resizing straight ARGB with transparent-black backgrounds).
+function Resize-Bitmap {
+    param([System.Drawing.Bitmap]$Src, [int]$Size)
+    $dst = New-Object System.Drawing.Bitmap $Size, $Size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($dst)
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.DrawImage($Src, (New-Object System.Drawing.Rectangle 0, 0, $Size, $Size))
     $g.Dispose()
+    return $dst
+}
 
-    # Encode as PNG in memory (no palette quantization), then wrap in a
-    # minimal single-frame ICO container by hand.
-    $pngStream = New-Object System.IO.MemoryStream
-    $bmp.Save($pngStream, [System.Drawing.Imaging.ImageFormat]::Png)
-    $pngBytes = $pngStream.ToArray()
-    $bmp.Dispose()
+# Draws a small filled circle badge (fill + darker rim) centered on $bmp,
+# in place -- used for the error icon's red center dot on the green mark.
+function Add-CenterDot {
+    param([System.Drawing.Bitmap]$Bmp, [string]$HexFill, [string]$HexRim)
+    $size = $Bmp.Width
+    $g = [System.Drawing.Graphics]::FromImage($Bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $fill = [System.Drawing.ColorTranslator]::FromHtml($HexFill)
+    $rim = [System.Drawing.ColorTranslator]::FromHtml($HexRim)
+    [float]$r = $size * 0.115
+    [float]$cx = $size / 2.0
+    [float]$cy = $size / 2.0
+    $rect = New-Object System.Drawing.RectangleF ($cx - $r), ($cy - $r), (2 * $r), (2 * $r)
+    $brush = New-Object System.Drawing.SolidBrush -ArgumentList $fill
+    $g.FillEllipse($brush, $rect)
+    $pen = New-Object System.Drawing.Pen -ArgumentList $rim, ([float]($size * 0.025))
+    $g.DrawEllipse($pen, $rect)
+    $g.Dispose()
+}
+
+# Packs one or more same-format bitmaps (each PNG-compressed) into a single
+# multi-entry ICO container (valid on Vista+). Avoids Bitmap.GetHicon(),
+# which routes through legacy GDI and quantizes true-color ARGB down to a
+# reduced system palette.
+function Write-Ico {
+    param([string]$Path, [System.Drawing.Bitmap[]]$Bitmaps)
+    $pngs = @()
+    foreach ($b in $Bitmaps) {
+        $ms = New-Object System.IO.MemoryStream
+        $b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $pngs += ,$ms.ToArray()
+    }
 
     $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create)
     $bw = New-Object System.IO.BinaryWriter($fs)
 
-    # ICONDIR: reserved(2)=0, type(2)=1 (icon), count(2)=1
     $bw.Write([UInt16]0)
     $bw.Write([UInt16]1)
-    $bw.Write([UInt16]1)
+    $bw.Write([UInt16]$Bitmaps.Count)
 
-    # ICONDIRENTRY: width(1) height(1) colorCount(1)=0 reserved(1)=0
-    # planes(2)=1 bitCount(2)=32 bytesInRes(4) imageOffset(4)=22
-    $bw.Write([byte]$size)
-    $bw.Write([byte]$size)
-    $bw.Write([byte]0)
-    $bw.Write([byte]0)
-    $bw.Write([UInt16]1)
-    $bw.Write([UInt16]32)
-    $bw.Write([UInt32]$pngBytes.Length)
-    $bw.Write([UInt32]22)
-
-    $bw.Write($pngBytes)
+    $offset = 6 + (16 * $Bitmaps.Count)
+    for ($i = 0; $i -lt $Bitmaps.Count; $i++) {
+        $s = $Bitmaps[$i].Width
+        $sizeByte = if ($s -ge 256) { 0 } else { [byte]$s }
+        $bw.Write([byte]$sizeByte)
+        $bw.Write([byte]$sizeByte)
+        $bw.Write([byte]0)
+        $bw.Write([byte]0)
+        $bw.Write([UInt16]1)
+        $bw.Write([UInt16]32)
+        $bw.Write([UInt32]$pngs[$i].Length)
+        $bw.Write([UInt32]$offset)
+        $offset += $pngs[$i].Length
+    }
+    foreach ($p in $pngs) { $bw.Write($p) }
     $bw.Flush()
     $fs.Close()
-
-    Write-Output "wrote $Path ($($pngBytes.Length) bytes png payload)"
+    Write-Output "wrote $Path ($($Bitmaps.Count) size(s))"
 }
 
-$outDir = "d:\Projects\projects_macbook\chimera_protocol\app\assets\icons"
+$source = New-Object System.Drawing.Bitmap $sourcePath
+
+# -- app_icon.ico: chimera_tray.exe's own icon -- the static brand mark, not
+# state-dependent, so it's just the source packed at standard Windows sizes.
+$appSizes = 16, 32, 48, 256
+$appBitmaps = $appSizes | ForEach-Object { Resize-Bitmap -Src $source -Size $_ }
+Write-Ico -Path "$repoRoot\app\windows\runner\resources\app_icon.ico" -Bitmaps $appBitmaps
+
+# -- Tray-state icons: same mark, recolored, single 32x32 frame (matches
+# what tray_manager expects and what main.dart's _assetIconPath resolves).
+$outDir = "$repoRoot\app\assets\icons"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-# Tokens from app/lib/theme.dart (dark palette -- brightest, most legible
-# against both light and dark taskbars, matches the app's dark-first identity).
-New-DotIcon -Path "$outDir\app_icon_connected.ico"    -HexColor "#49D6B3" -HexRim "#1C7A61"
-New-DotIcon -Path "$outDir\app_icon_disconnected.ico" -HexColor "#8FA098" -HexRim "#4E5D56"
-New-DotIcon -Path "$outDir\app_icon_error.ico"        -HexColor "#E2604F" -HexRim "#8E2E22"
+# Colors mirror app/lib/theme.dart's dark palette: _darkDanger (#E2604F) and
+# _darkAccent (#49D6B3) -- so the tray matches the in-app connect/error colors
+# instead of introducing a second, unrelated red/green.
+$disconnectedMask = ConvertTo-ColoredMask -Src $source -HexColor "#E2604F"
+$connectedMask    = ConvertTo-ColoredMask -Src $source -HexColor "#49D6B3"
+$errorMask        = ConvertTo-ColoredMask -Src $source -HexColor "#49D6B3"
+
+$disconnected32 = Resize-Bitmap -Src $disconnectedMask -Size 32
+$connected32    = Resize-Bitmap -Src $connectedMask -Size 32
+$error32        = Resize-Bitmap -Src $errorMask -Size 32
+Add-CenterDot -Bmp $error32 -HexFill "#E2604F" -HexRim "#8E2E22"
+
+Write-Ico -Path "$outDir\app_icon_disconnected.ico" -Bitmaps @($disconnected32)
+Write-Ico -Path "$outDir\app_icon_connected.ico" -Bitmaps @($connected32)
+Write-Ico -Path "$outDir\app_icon_error.ico" -Bitmaps @($error32)
+
+$source.Dispose()
