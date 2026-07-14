@@ -24,6 +24,14 @@ import (
 // key. The deployer parses only this line; the private key stays on the VPS.
 const pubMarker = "CHIMERA_PUB="
 
+// portInUseMarker is what the remote script's port pre-check (script.go)
+// prints to stderr when the requested server port is already bound by
+// something else on the VPS. Deploy pattern-matches on it (and on Docker's
+// own "address already in use" wording, for the race where something grabs
+// the port mid-build) to turn a buried shell/Docker error into a message an
+// operator can act on immediately.
+const portInUseMarker = "CHIMERA_PORT_IN_USE"
+
 // defaults for a DeploySpec; applied by normalize.
 const (
 	defaultSSHPort      = 22
@@ -96,6 +104,14 @@ func (d *SSHDeployer) Deploy(ctx context.Context, spec DeploySpec) (DeployResult
 
 	out, err := d.Runner.Run(ctx, script)
 	if err != nil {
+		if strings.Contains(err.Error(), portInUseMarker) ||
+			strings.Contains(err.Error(), "address already in use") {
+			return DeployResult{}, fmt.Errorf(
+				"provision: port %d is already in use on this server "+
+					"(another process or a leftover container is bound to "+
+					"it) -- free the port or pick a different one and try "+
+					"again", spec.ServerPort)
+		}
 		return DeployResult{}, fmt.Errorf("provision: remote deploy failed: %w", err)
 	}
 

@@ -85,6 +85,63 @@ function Resize-Bitmap {
     return $dst
 }
 
+# Finds the tight bounding box of the non-background silhouette and returns
+# a centered square crop of $Src padded by $PaddingFrac of the box's larger
+# dimension. The source mark has a lot of empty margin around the lion (by
+# design, for a comfortable app-icon composition) -- at 16-32px tray sizes
+# that margin ate most of the icon's visible pixels, which is why the tray
+# icon looked "too small" even though the file itself was fine. Cropping
+# tight before the recolor+downscale pipeline makes the glyph fill the
+# canvas instead. Bbox detection runs on a small downscaled copy for speed
+# (the source is 2048px) and is scaled back up to source-pixel coordinates.
+function Get-TightSquareCrop {
+    param([System.Drawing.Bitmap]$Src, [double]$PaddingFrac = 0.08)
+    $probeSize = 256
+    $probe = Resize-Bitmap -Src $Src -Size $probeSize
+    $data = $probe.LockBits(
+        (New-Object System.Drawing.Rectangle 0, 0, $probeSize, $probeSize),
+        [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $bytes = $data.Stride * $probeSize
+    $buf = New-Object byte[] $bytes
+    [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $bytes)
+    $probe.UnlockBits($data)
+
+    $minX = $probeSize; $minY = $probeSize; $maxX = 0; $maxY = 0
+    $range = $fgLum - $bgLum
+    for ($y = 0; $y -lt $probeSize; $y++) {
+        $row = $y * $data.Stride
+        for ($x = 0; $x -lt $probeSize; $x++) {
+            $i = $row + ($x * 4)
+            $lum = ($buf[$i + 2] + $buf[$i + 1] + $buf[$i]) / 3.0
+            $a = (($lum - $bgLum) / $range) * 255.0
+            if ($a -gt 40) {
+                if ($x -lt $minX) { $minX = $x }
+                if ($x -gt $maxX) { $maxX = $x }
+                if ($y -lt $minY) { $minY = $y }
+                if ($y -gt $maxY) { $maxY = $y }
+            }
+        }
+    }
+
+    $scale = $Src.Width / [double]$probeSize
+    $bx0 = $minX * $scale; $by0 = $minY * $scale
+    $bx1 = ($maxX + 1) * $scale; $by1 = ($maxY + 1) * $scale
+    $bw = $bx1 - $bx0; $bh = $by1 - $by0
+    $cx = ($bx0 + $bx1) / 2.0; $cy = ($by0 + $by1) / 2.0
+
+    $side = [Math]::Max($bw, $bh) * (1.0 + 2.0 * $PaddingFrac)
+    $half = $side / 2.0
+    $left = [Math]::Max(0, [Math]::Round($cx - $half))
+    $top = [Math]::Max(0, [Math]::Round($cy - $half))
+    $edge = [Math]::Min($Src.Width - $left, $Src.Height - $top)
+    $edge = [Math]::Min($edge, [Math]::Round($side))
+
+    return $Src.Clone(
+        (New-Object System.Drawing.Rectangle $left, $top, $edge, $edge),
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+}
+
 # Draws a small filled circle badge (fill + darker rim) centered on $bmp,
 # in place -- used for the error icon's red center dot on the green mark.
 function Add-CenterDot {
@@ -153,25 +210,34 @@ $appSizes = 16, 32, 48, 256
 $appBitmaps = $appSizes | ForEach-Object { Resize-Bitmap -Src $source -Size $_ }
 Write-Ico -Path "$repoRoot\app\windows\runner\resources\app_icon.ico" -Bitmaps $appBitmaps
 
-# -- Tray-state icons: same mark, recolored, single 32x32 frame (matches
-# what tray_manager expects and what main.dart's _assetIconPath resolves).
+# -- Tray-state icons: same mark, tightly cropped to fill the canvas (see
+# Get-TightSquareCrop) and recolored. Windows requests different frame sizes
+# from the tray icon depending on display scaling (16px at 100%, up to 32px
+# at 200%); shipping all four instead of a single 32x32 frame means it
+# always gets a crisp native-resolution frame instead of scaling one up/down.
 $outDir = "$repoRoot\app\assets\icons"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$traySizes = 16, 20, 24, 32
+
+$trayCrop = Get-TightSquareCrop -Src $source
 
 # Colors mirror app/lib/theme.dart's dark palette: _darkDanger (#E2604F) and
 # _darkAccent (#49D6B3) -- so the tray matches the in-app connect/error colors
 # instead of introducing a second, unrelated red/green.
-$disconnectedMask = ConvertTo-ColoredMask -Src $source -HexColor "#E2604F"
-$connectedMask    = ConvertTo-ColoredMask -Src $source -HexColor "#49D6B3"
-$errorMask        = ConvertTo-ColoredMask -Src $source -HexColor "#49D6B3"
+$disconnectedMask = ConvertTo-ColoredMask -Src $trayCrop -HexColor "#E2604F"
+$connectedMask    = ConvertTo-ColoredMask -Src $trayCrop -HexColor "#49D6B3"
+$errorMask        = ConvertTo-ColoredMask -Src $trayCrop -HexColor "#49D6B3"
 
-$disconnected32 = Resize-Bitmap -Src $disconnectedMask -Size 32
-$connected32    = Resize-Bitmap -Src $connectedMask -Size 32
-$error32        = Resize-Bitmap -Src $errorMask -Size 32
-Add-CenterDot -Bmp $error32 -HexFill "#E2604F" -HexRim "#8E2E22"
+$disconnectedBitmaps = $traySizes | ForEach-Object { Resize-Bitmap -Src $disconnectedMask -Size $_ }
+$connectedBitmaps    = $traySizes | ForEach-Object { Resize-Bitmap -Src $connectedMask -Size $_ }
+$errorBitmaps        = $traySizes | ForEach-Object {
+    $b = Resize-Bitmap -Src $errorMask -Size $_
+    Add-CenterDot -Bmp $b -HexFill "#E2604F" -HexRim "#8E2E22"
+    $b
+}
 
-Write-Ico -Path "$outDir\app_icon_disconnected.ico" -Bitmaps @($disconnected32)
-Write-Ico -Path "$outDir\app_icon_connected.ico" -Bitmaps @($connected32)
-Write-Ico -Path "$outDir\app_icon_error.ico" -Bitmaps @($error32)
+Write-Ico -Path "$outDir\app_icon_disconnected.ico" -Bitmaps $disconnectedBitmaps
+Write-Ico -Path "$outDir\app_icon_connected.ico" -Bitmaps $connectedBitmaps
+Write-Ico -Path "$outDir\app_icon_error.ico" -Bitmaps $errorBitmaps
 
 $source.Dispose()

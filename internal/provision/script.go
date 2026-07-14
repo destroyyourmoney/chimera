@@ -33,6 +33,16 @@ func buildDeployScript(spec DeploySpec, shortIDs []string) (string, error) {
 	b.WriteString("set -eu\n")
 	b.WriteString("export DEBIAN_FRONTEND=noninteractive\n")
 
+	// 0. Fail fast if the target port is already bound by something else
+	// (another web server, a leftover container under a different name,
+	// etc.) -- otherwise the operator waits through the full apt/git/docker
+	// build only to have the final `docker run -p` fail with a much less
+	// legible daemon error. ss ships with iproute2, which is present on
+	// every stock Ubuntu/Debian image; skip the check silently if it isn't
+	// (the docker run step below still catches it, just later).
+	b.WriteString("if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE \":" + port + "$\"; then ")
+	b.WriteString("echo \"" + portInUseMarker + ": port " + port + " is already in use on this server\" >&2; exit 1; fi\n")
+
 	// 1. Ensure git + docker are present.
 	b.WriteString("if ! command -v git >/dev/null 2>&1; then ")
 	b.WriteString("(apt-get update && apt-get install -y --no-install-recommends git) >/dev/null 2>&1; fi\n")
