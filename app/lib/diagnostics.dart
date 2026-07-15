@@ -42,7 +42,6 @@ class Diagnostics {
       buf.writeln('  - $label: ${_redactLink(s.link)}');
     }
     buf
-      ..writeln('SOCKS listen: ${settings.listenAddr}')
       ..writeln('Autostart: ${settings.autostart}')
       ..writeln('Network protection: ${settings.networkProtection.name}')
       ..writeln('Custom DNS: ${settings.customDns.join(", ")}')

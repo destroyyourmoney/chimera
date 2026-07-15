@@ -69,9 +69,9 @@ class _VpnSettingsPageState extends State<VpnSettingsPage> {
           _sectionLabel(tokens, 'Network protection'),
           const SizedBox(height: 2),
           Text(
-            'Runs a real full-tunnel TUN device with OS-level firewall rules '
-            '(one UAC prompt). Separate from the SOCKS5 proxy the rest of '
-            'the app uses.',
+            'Runs a real full-tunnel TUN device with OS-level firewall '
+            'rules (one UAC prompt, or none once chimera-helper is '
+            'installed).',
             style: TextStyle(
               fontFamily: 'Plex Sans',
               fontSize: 12,
@@ -92,13 +92,6 @@ class _VpnSettingsPageState extends State<VpnSettingsPage> {
               ),
             ),
           const SizedBox(height: 6),
-          _modeTile(
-            tokens,
-            value: NetworkProtectionMode.off,
-            title: 'Off',
-            subtitle: 'TUN-less SOCKS5 only, no elevation.',
-            canEdit: canEdit,
-          ),
           _modeTile(
             tokens,
             value: NetworkProtectionMode.dnsLeakGuard,

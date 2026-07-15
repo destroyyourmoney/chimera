@@ -5,6 +5,7 @@
 // Settings/Split-tunneling nav rows on Home.
 import 'package:flutter/material.dart';
 
+import 'anti_censorship_page.dart';
 import 'app_info.dart';
 import 'app_info_page.dart';
 import 'settings_store.dart';
@@ -24,6 +25,7 @@ class SettingsHubPage extends StatelessWidget {
     required this.onToggleAutostart,
     required this.onSetNetworkProtection,
     required this.onSetCustomDns,
+    required this.onSetTransport,
     required this.buildDiagnosticsReport,
     required this.onDisconnectAndQuit,
   });
@@ -35,6 +37,7 @@ class SettingsHubPage extends StatelessWidget {
   final ValueChanged<bool> onToggleAutostart;
   final Future<void> Function(NetworkProtectionMode mode) onSetNetworkProtection;
   final Future<void> Function(List<String> dns) onSetCustomDns;
+  final Future<void> Function(String transport) onSetTransport;
   final String Function() buildDiagnosticsReport;
   final VoidCallback onDisconnectAndQuit;
 
@@ -44,8 +47,17 @@ class SettingsHubPage extends StatelessWidget {
         return 'Kill switch';
       case NetworkProtectionMode.dnsLeakGuard:
         return 'DNS leak guard';
-      case NetworkProtectionMode.off:
-        return 'Off';
+    }
+  }
+
+  String _transportLabel(String t) {
+    switch (t) {
+      case 'quic':
+        return 'QUIC';
+      case 'tcp':
+        return 'TCP';
+      default:
+        return 'Automatic';
     }
   }
 
@@ -77,6 +89,22 @@ class SettingsHubPage extends StatelessWidget {
                           hasServers: settings.servers.isNotEmpty,
                           onSetMode: onSetNetworkProtection,
                           onSetCustomDns: onSetCustomDns,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _hubRow(
+                    context,
+                    tokens,
+                    title: 'Anti-censorship',
+                    subtitle: _transportLabel(settings.transport),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => AntiCensorshipPage(
+                          transport: settings.transport,
+                          busy: busy,
+                          onSetTransport: onSetTransport,
                         ),
                       ),
                     ),

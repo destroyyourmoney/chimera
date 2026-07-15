@@ -1,17 +1,15 @@
-// Tests ChimeraService's main-isolate bookkeeping: connect()/disconnect()
-// return values and the reconnect watchdog's exponential backoff, against a
-// FakeChimeraApi instead of the real chimera.dll (not present in the
-// `flutter test` working directory, and each real call would be an actual
-// native call). The StartSocks runner always spawns via the real
-// ChimeraBindings.open() singleton (isolates can't share injected fakes) --
-// in this test environment that isolate fails to load chimera.dll and dies
-// with a stderr-only error, which is harmless and doesn't affect the
-// assertions below (they only cover main-isolate state, which is already
-// returned/set before the isolate's own outcome matters).
+// Tests TunnelService's connect/disconnect bookkeeping and the reconnect
+// watchdog's exponential backoff, against a FakeChimeraApi (the fast
+// FFI preflight) and a FakeNetworkProtectionController (the TUN engage/
+// disengage/status calls) instead of the real chimera.dll and chimera-helper
+// IPC.
 import 'dart:convert';
 
 import 'package:chimera_tray/chimera_bindings.dart';
 import 'package:chimera_tray/chimera_service.dart';
+import 'package:chimera_tray/nethelper_client.dart';
+import 'package:chimera_tray/network_protection.dart';
+import 'package:chimera_tray/settings_store.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -61,7 +59,51 @@ class FakeChimeraApi implements ChimeraNativeApi {
   void freeHandle(int handle) {}
 }
 
+class FakeNetworkProtectionController implements NetworkProtectionController {
+  String? engageError;
+  int engageCallCount = 0;
+  int disengageCallCount = 0;
+  bool running = false;
+  String transport = 'quic';
+  int bytesUp = 0;
+  int bytesDown = 0;
+
+  @override
+  Future<NetworkProtectionResult> engage({
+    required NetworkProtectionMode mode,
+    required String server,
+    required String pbk,
+    String sni = '',
+    String sid = '',
+    List<String> dns = kDefaultCustomDns,
+    String transport = '',
+  }) async {
+    engageCallCount++;
+    if (engageError != null) {
+      return NetworkProtectionResult(ok: false, error: engageError!);
+    }
+    running = true;
+    return const NetworkProtectionResult(ok: true);
+  }
+
+  @override
+  Future<void> disengage() async {
+    disengageCallCount++;
+    running = false;
+  }
+
+  @override
+  Future<NetHelperResult> status() async => NetHelperResult(
+    ok: true,
+    state: running ? 'running' : 'idle',
+    transport: transport,
+    bytesUp: bytesUp,
+    bytesDown: bytesDown,
+  );
+}
+
 const _sub = '#!chimera-subscription-v1\nchimera://127.0.0.1:443?pbk=x\n';
+const _primary = PrimaryServer(host: '127.0.0.1', port: '443', pbk: 'x');
 
 void main() {
   group('ChimeraState.fromJson', () {
@@ -91,35 +133,62 @@ void main() {
     });
   });
 
-  group('ChimeraService.connect', () {
-    test('returns the error string on a failed native connect, without spawning the runner', () async {
+  group('TunnelService.connect', () {
+    test('returns the preflight error string on a failed native connect, without engaging the tunnel', () async {
       final fake = FakeChimeraApi()..connectError = 'auth failed';
-      final service = ChimeraService(bindings: fake);
-      final err = await service.connect(_sub);
+      final controller = FakeNetworkProtectionController();
+      final service = TunnelService(bindings: fake, controller: controller);
+      final err = await service.connect(_sub, primaryServer: _primary);
       expect(err, 'auth failed');
       expect(fake.newTunnelCallCount, 1);
       expect(fake.connectCallCount, 1);
+      expect(controller.engageCallCount, 0);
       service.dispose();
     });
 
-    test('returns null on success and records the native calls', () async {
+    test('returns the engage error when the preflight succeeds but NetworkProtection fails', () async {
       final fake = FakeChimeraApi();
-      final service = ChimeraService(bindings: fake);
-      final err = await service.connect(_sub, listen: '127.0.0.1:11080');
+      final controller = FakeNetworkProtectionController()..engageError = 'helper unavailable';
+      final service = TunnelService(bindings: fake, controller: controller);
+      final err = await service.connect(_sub, primaryServer: _primary);
+      expect(err, 'helper unavailable');
+      expect(controller.engageCallCount, 1);
+      service.dispose();
+    });
+
+    test('returns null on success and records the native + engage calls', () async {
+      final fake = FakeChimeraApi();
+      final controller = FakeNetworkProtectionController();
+      final service = TunnelService(bindings: fake, controller: controller);
+      final err = await service.connect(_sub, primaryServer: _primary);
       expect(err, isNull);
       expect(fake.newTunnelCallCount, 1);
       expect(fake.connectCallCount, 1);
+      expect(controller.engageCallCount, 1);
       service.dispose();
     });
   });
 
-  group('ChimeraService reconnect watchdog', () {
-    test('retries with exponential backoff capped at 30s while connect keeps failing', () {
+  group('TunnelService.disconnect', () {
+    test('disengages network protection', () async {
+      final fake = FakeChimeraApi();
+      final controller = FakeNetworkProtectionController();
+      final service = TunnelService(bindings: fake, controller: controller);
+      await service.connect(_sub, primaryServer: _primary);
+      await service.disconnect();
+      expect(controller.disengageCallCount, greaterThanOrEqualTo(1));
+      service.dispose();
+    });
+  });
+
+  group('TunnelService reconnect watchdog', () {
+    test('retries with exponential backoff capped at 30s while the preflight keeps failing', () {
       fakeAsync((async) {
         final fake = FakeChimeraApi()..connectError = 'boom';
-        final service = ChimeraService(bindings: fake);
+        final controller = FakeNetworkProtectionController();
+        final service = TunnelService(bindings: fake, controller: controller);
 
-        service.connect(_sub);
+        service.connect(_sub, primaryServer: _primary);
         async.flushMicrotasks();
         expect(fake.connectCallCount, 1);
 
@@ -148,9 +217,10 @@ void main() {
     test('disconnect() cancels a pending reconnect and stops further retries', () {
       fakeAsync((async) {
         final fake = FakeChimeraApi()..connectError = 'boom';
-        final service = ChimeraService(bindings: fake);
+        final controller = FakeNetworkProtectionController();
+        final service = TunnelService(bindings: fake, controller: controller);
 
-        service.connect(_sub);
+        service.connect(_sub, primaryServer: _primary);
         async.flushMicrotasks();
         expect(fake.connectCallCount, 1);
 
@@ -167,9 +237,10 @@ void main() {
     test('a fresh connect() call resets backoff to the minimum', () {
       fakeAsync((async) {
         final fake = FakeChimeraApi()..connectError = 'boom';
-        final service = ChimeraService(bindings: fake);
+        final controller = FakeNetworkProtectionController();
+        final service = TunnelService(bindings: fake, controller: controller);
 
-        service.connect(_sub);
+        service.connect(_sub, primaryServer: _primary);
         async.flushMicrotasks();
         async.elapse(const Duration(seconds: 2));
         async.elapse(const Duration(seconds: 4));
@@ -177,7 +248,7 @@ void main() {
 
         // User-initiated reconnect should restart backoff at the minimum
         // (2s), not continue from wherever the watchdog had grown to.
-        service.connect(_sub);
+        service.connect(_sub, primaryServer: _primary);
         async.flushMicrotasks();
         expect(fake.connectCallCount, 4);
 

@@ -20,7 +20,7 @@ func TestPowerShellBuildsFullTunnelPlan(t *testing.T) {
 		"Set-DnsClientServerAddress",
 		"0.0.0.0/1",
 		"128.0.0.0/1",
-		"Get-NetRoute -RemoteIPAddress",
+		"Find-NetRoute -RemoteIPAddress",
 		"203.0.113.10",
 		"example.com",
 	} {

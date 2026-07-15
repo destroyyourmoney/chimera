@@ -32,9 +32,9 @@ void main() {
           ServerEntry(id: '2', label: 'second', link: 'chimera://b:443'),
         ],
         signKeyHex: 'deadbeef',
-        listenAddr: '127.0.0.1:2080',
         autostart: true,
         networkProtection: NetworkProtectionMode.killswitch,
+        transport: 'quic',
         customDns: ['9.9.9.9'],
         lastConnectedServerId: '1',
       );
@@ -43,9 +43,9 @@ void main() {
       expect(decoded.servers[0].label, 'first');
       expect(decoded.servers[1].link, 'chimera://b:443');
       expect(decoded.signKeyHex, 'deadbeef');
-      expect(decoded.listenAddr, '127.0.0.1:2080');
       expect(decoded.autostart, true);
       expect(decoded.networkProtection, NetworkProtectionMode.killswitch);
+      expect(decoded.transport, 'quic');
       expect(decoded.customDns, ['9.9.9.9']);
       expect(decoded.lastConnectedServerId, '1');
     });
@@ -54,11 +54,34 @@ void main() {
       final decoded = ChimeraSettings.fromJson({});
       expect(decoded.servers, isEmpty);
       expect(decoded.signKeyHex, '');
-      expect(decoded.listenAddr, '127.0.0.1:1080');
       expect(decoded.autostart, false);
-      expect(decoded.networkProtection, NetworkProtectionMode.off);
+      // A missing key (never explicitly saved -- including settings files
+      // from before this field existed) migrates to the dnsLeakGuard
+      // default -- the floor tier, since the app is TUN-only and there's no
+      // "off" anymore. See _networkProtectionModeFromJson's doc comment.
+      expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
+      expect(decoded.transport, 'auto');
       expect(decoded.customDns, kDefaultCustomDns);
       expect(decoded.lastConnectedServerId, isNull);
+    });
+
+    test('fromJson migrates a settings file saved before SOCKS5 removal ("off") to dnsLeakGuard', () {
+      final decoded = ChimeraSettings.fromJson({'networkProtection': 'off'});
+      expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
+    });
+
+    test('transport round-trips quic and tcp', () {
+      for (final t in ['quic', 'tcp']) {
+        final decoded = ChimeraSettings.fromJson(
+          ChimeraSettings(transport: t).toJson(),
+        );
+        expect(decoded.transport, t);
+      }
+    });
+
+    test('fromJson treats an unknown transport string as auto', () {
+      final decoded = ChimeraSettings.fromJson({'transport': 'garbage'});
+      expect(decoded.transport, 'auto');
     });
 
     test('networkProtection round-trips dnsLeakGuard mode too', () {
@@ -69,9 +92,9 @@ void main() {
       expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
     });
 
-    test('fromJson treats an unknown networkProtection string as off', () {
+    test('fromJson treats an unknown networkProtection string as dnsLeakGuard', () {
       final decoded = ChimeraSettings.fromJson({'networkProtection': 'garbage'});
-      expect(decoded.networkProtection, NetworkProtectionMode.off);
+      expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
     });
 
     test('subscriptionText assembles the #!chimera-subscription-v1 header and one link per line', () {

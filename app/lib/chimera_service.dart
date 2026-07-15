@@ -1,15 +1,19 @@
-// App-level wrapper around ChimeraBindings: owns the tunnel handle lifecycle,
-// runs the blocking StartSocks call on a background isolate (dart:ffi calls
-// block the calling isolate for their whole native-call duration, and
-// StartSocks blocks until Stop()), and polls StateJSON on a timer for the
-// tray UI. Mirrors the lifecycle mobile/bind.go's doc comment prescribes:
-// Connect() returns fast, StartSocks() blocks on a background thread,
-// StateJSON() is polled ~1s.
+// TUN-only tunnel lifecycle for the tray app: no SOCKS5, no chimera.dll
+// session. Connect does a fast reachability preflight over chimera.dll's
+// FFI (newTunnel/connect/freeHandle -- no startSocks, no isolate, no
+// session left open), then hands off to NetworkProtectionController.engage
+// to bring up the real TUN device/routes/firewall via chimera-helper (or its
+// elevated CLI fallback). Live state/throughput comes from polling
+// NetworkProtectionController.status, which is chimera-helper reading the
+// chimera.exe tun child's own status file (see internal/tun.Bridge.Stats
+// and cmd/chimera/tun_on.go's runStatusWriter) -- not from any local proxy
+// session, which is what used to leave the tray showing 0 B/s.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:isolate';
 
 import 'chimera_bindings.dart';
+import 'network_protection.dart';
+import 'settings_store.dart';
 
 class EndpointStatus {
   const EndpointStatus({
@@ -71,45 +75,62 @@ class ChimeraState {
   bool get isConnected => state == 'connected';
 }
 
-/// _startSocksInIsolate re-opens chimera.dll in the spawned isolate (a
-/// DynamicLibrary handle isn't shared across isolates) and runs the blocking
-/// StartSocks call there. Only the plain-int handle crosses the isolate
-/// boundary -- it's just an opaque number (a runtime/cgo.Handle key on the Go
-/// side), not a native pointer, so it's safe to pass via the isolate's
-/// argument.
-void _startSocksInIsolate(List<Object> args) {
-  final handle = args[0] as int;
-  final listen = args[1] as String;
-  final SendPort done = args[2] as SendPort;
-  final bindings = ChimeraBindings.open();
-  final err = bindings.startSocks(handle, listen);
-  done.send(err);
+/// PrimaryServer is the parsed connection material for the one server the
+/// TUN device is actually built against -- resolved by the caller (see
+/// main.dart's _resolvePrimaryServer, unchanged) from the first saved
+/// server's link, the same "primary server" convention the old
+/// NetworkProtection.enable call sites already used.
+class PrimaryServer {
+  const PrimaryServer({
+    required this.host,
+    required this.port,
+    required this.pbk,
+    this.sni = '',
+    this.sid = '',
+    this.transport = '',
+  });
+
+  final String host;
+  final String port;
+  final String pbk;
+  final String sni;
+  final String sid;
+
+  /// Anti-censorship transport carried by this server's chimera:// link
+  /// (its Mode field: '', 'auto', 'quic', or 'tcp') -- forced onto the TUN
+  /// device's carrier dialer so full-tunnel Connect actually uses the
+  /// obfuscation method the server was configured with, the same way the
+  /// old SOCKS5 path used to.
+  final String transport;
+
+  String get address => '$host:$port';
 }
 
-class ChimeraService {
-  /// bindings is injectable so tests can exercise connect/disconnect/
-  /// reconnect-watchdog logic against a fake instead of the real
-  /// chimera.dll. The spawned StartSocks isolate always uses the real
-  /// ChimeraBindings.open() (isolates don't share objects), so injection
-  /// only covers the main-isolate-only logic -- which is exactly what the
-  /// watchdog and connect()/disconnect() bookkeeping is.
-  ChimeraService({ChimeraNativeApi? bindings})
-    : _bindings = bindings ?? ChimeraBindings.open();
+class TunnelService {
+  /// bindings/controller are injectable so tests can exercise connect/
+  /// disconnect/reconnect-watchdog logic against fakes instead of the real
+  /// chimera.dll and chimera-helper IPC.
+  TunnelService({ChimeraNativeApi? bindings, NetworkProtectionController? controller})
+    : _bindings = bindings ?? ChimeraBindings.open(),
+      _controller = controller ?? DefaultNetworkProtectionController();
 
   final ChimeraNativeApi _bindings;
-  int? _handle;
-  Isolate? _runnerIsolate;
+  final NetworkProtectionController _controller;
+
   Timer? _pollTimer;
   final _stateController = StreamController<ChimeraState>.broadcast();
 
-  // Reconnect watchdog (Phase F): _desiredConnected reflects the user's own
-  // Connect/Disconnect intent, not transient link state. When the poll loop
-  // observes a drop while it's true, _scheduleReconnect retries with capped
-  // exponential backoff instead of hammering a dead server.
+  // Reconnect watchdog: _desiredConnected reflects the user's own Connect/
+  // Disconnect intent, not transient link state. When a poll observes the
+  // tunnel down while it's true, _scheduleReconnect retries the whole
+  // preflight+engage flow with capped exponential backoff instead of
+  // hammering a dead server.
   bool _desiredConnected = false;
   String _lastSubscriptionText = '';
   String _lastSignKeyHex = '';
-  String _lastListen = '127.0.0.1:1080';
+  NetworkProtectionMode _lastMode = NetworkProtectionMode.dnsLeakGuard;
+  List<String> _lastDns = List.of(kDefaultCustomDns);
+  PrimaryServer? _lastPrimaryServer;
   Timer? _reconnectTimer;
   Duration _reconnectDelay = _minReconnectDelay;
   static const _minReconnectDelay = Duration(seconds: 2);
@@ -117,35 +138,34 @@ class ChimeraService {
 
   Stream<ChimeraState> get stateUpdates => _stateController.stream;
 
-  /// connect builds a tunnel from a `#!chimera-subscription-v1` document (a
-  /// single `chimera://` link is a valid one-line subscription), connects
-  /// (fast -- verifies reachability), then starts the SOCKS5 fallback
-  /// listener on a background isolate. Returns an error message, or null on
-  /// success.
+  /// connect verifies the subscription reaches a real handshake fast (via
+  /// chimera.dll, no session left open), then brings up the full-tunnel TUN
+  /// device against [primaryServer] at [mode]. Returns an error message, or
+  /// null on success.
   Future<String?> connect(
     String subscriptionText, {
+    required PrimaryServer primaryServer,
     String signKeyHex = '',
-    String listen = '127.0.0.1:1080',
+    NetworkProtectionMode mode = NetworkProtectionMode.dnsLeakGuard,
+    List<String> dns = kDefaultCustomDns,
   }) async {
     await _teardown();
     _desiredConnected = true;
     _lastSubscriptionText = subscriptionText;
     _lastSignKeyHex = signKeyHex;
-    _lastListen = listen;
+    _lastMode = mode;
+    _lastDns = dns;
+    _lastPrimaryServer = primaryServer;
     _reconnectDelay = _minReconnectDelay;
 
-    final err = await _connectOnce(subscriptionText, signKeyHex, listen);
+    final err = await _connectOnce();
     if (err == null) return null;
     if (_desiredConnected) _scheduleReconnect();
     return err;
   }
 
-  Future<String?> _connectOnce(
-    String subscriptionText,
-    String signKeyHex,
-    String listen,
-  ) async {
-    final newTunnelResult = _bindings.newTunnel(subscriptionText, signKeyHex);
+  Future<String?> _connectOnce() async {
+    final newTunnelResult = _bindings.newTunnel(_lastSubscriptionText, _lastSignKeyHex);
     final newTunnelEnv = jsonDecode(newTunnelResult) as Map<String, dynamic>;
     final handleErr = newTunnelEnv['error'] as String? ?? '';
     if (handleErr.isNotEmpty) {
@@ -153,27 +173,28 @@ class ChimeraService {
       return handleErr;
     }
     final handle = (newTunnelEnv['handle'] as num).toInt();
-    _handle = handle;
 
     final connectErr = _bindings.connect(handle);
+    _bindings.freeHandle(handle);
     if (connectErr.isNotEmpty) {
-      _bindings.freeHandle(handle);
-      _handle = null;
       _stateController.add(ChimeraState.disconnected(lastError: connectErr));
       return connectErr;
     }
 
-    final receivePort = ReceivePort();
-    _runnerIsolate = await Isolate.spawn(_startSocksInIsolate, [
-      handle,
-      listen,
-      receivePort.sendPort,
-    ]);
-    // Listen for the runner's eventual exit (Stop() or a real failure) purely
-    // for diagnostics; the tray doesn't need to react beyond logging today.
-    receivePort.listen((message) {
-      receivePort.close();
-    });
+    final primary = _lastPrimaryServer!;
+    final result = await _controller.engage(
+      mode: _lastMode,
+      server: primary.address,
+      pbk: primary.pbk,
+      sni: primary.sni,
+      sid: primary.sid,
+      dns: _lastDns,
+      transport: primary.transport,
+    );
+    if (!result.ok) {
+      _stateController.add(ChimeraState.disconnected(lastError: result.error));
+      return result.error;
+    }
 
     _startPolling();
     return null;
@@ -192,26 +213,14 @@ class ChimeraService {
   Future<void> _teardown() async {
     _pollTimer?.cancel();
     _pollTimer = null;
-
-    final handle = _handle;
-    if (handle != null) {
-      _bindings.stop(handle); // cancels the blocking StartSocks runner
-      _bindings.freeHandle(handle);
-      _handle = null;
-    }
-    _runnerIsolate?.kill(priority: Isolate.immediate);
-    _runnerIsolate = null;
+    await _controller.disengage();
   }
 
   void _scheduleReconnect() {
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(_reconnectDelay, () async {
       if (!_desiredConnected) return;
-      final err = await _connectOnce(
-        _lastSubscriptionText,
-        _lastSignKeyHex,
-        _lastListen,
-      );
+      final err = await _connectOnce();
       if (err != null && _desiredConnected) {
         _scheduleReconnect();
       } else if (err == null) {
@@ -225,23 +234,18 @@ class ChimeraService {
   void _startPolling() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      final handle = _handle;
-      if (handle == null) return;
-      final json = _bindings.stateJSON(handle);
-      try {
-        final decoded = jsonDecode(json) as Map<String, dynamic>;
-        final state = ChimeraState.fromJson(decoded);
-        _stateController.add(state);
-        if (_desiredConnected &&
-            !state.isConnected &&
-            _reconnectTimer == null) {
-          await _teardown();
-          _scheduleReconnect();
-        }
-      } catch (_) {
-        // Malformed state JSON should never happen (Go side always emits
-        // valid JSON, see facade.go's StateJSON doc comment) -- ignore a
-        // single bad tick rather than crash the UI.
+      final result = await _controller.status();
+      final state = ChimeraState(
+        state: result.isRunning ? 'connected' : 'disconnected',
+        transport: result.transport,
+        bytesUp: result.bytesUp,
+        bytesDown: result.bytesDown,
+        lastError: result.ok ? '' : result.error,
+      );
+      _stateController.add(state);
+      if (_desiredConnected && !state.isConnected && _reconnectTimer == null) {
+        await _teardown();
+        _scheduleReconnect();
       }
     });
   }
@@ -249,7 +253,6 @@ class ChimeraService {
   void dispose() {
     _pollTimer?.cancel();
     _reconnectTimer?.cancel();
-    _runnerIsolate?.kill(priority: Isolate.immediate);
     _stateController.close();
   }
 }

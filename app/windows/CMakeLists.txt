@@ -95,6 +95,28 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/chimera.exe")
     COMPONENT Runtime)
 endif()
 
+# chimera-helper.exe (cmd/chimera-helper) is the persistent elevated Windows
+# service that owns full-tunnel network setup so Connect doesn't need a UAC
+# prompt every time -- see internal/nethelper's doc comment. Optional, same
+# convention as chimera.exe above.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/chimera-helper.exe")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/chimera-helper.exe"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}"
+    COMPONENT Runtime)
+endif()
+
+# wintun.dll: the actual Wintun driver binary (from third_party/wintun/, see
+# its README for provenance) that golang.zx2c4.com/wireguard/tun loads at
+# runtime to create the TUN device. Without it next to chimera.exe,
+# `chimera tun` fails to create the adapter at all -- silently as far as the
+# helper service is concerned, since the failure happens at Windows' DLL
+# loader level before chimera.exe's own logging even starts.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/wintun.dll")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/wintun.dll"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}"
+    COMPONENT Runtime)
+endif()
+
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 

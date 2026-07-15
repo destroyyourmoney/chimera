@@ -105,7 +105,11 @@ func PowerShell(c Config) (string, error) {
 	b.WriteString("  if ([System.Net.IPAddress]::TryParse($name, [ref]$parsed) -and $parsed.AddressFamily -eq 'InterNetwork') { $ips += $parsed.IPAddressToString }\n")
 	b.WriteString("  else { $ips += [System.Net.Dns]::GetHostAddresses($name) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString } }\n")
 	b.WriteString("  foreach ($ip in $ips) {\n")
-	b.WriteString("    $r = Get-NetRoute -RemoteIPAddress $ip -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1\n")
+	// Get-NetRoute has no -RemoteIPAddress parameter (that's Find-NetRoute,
+	// which resolves the route Windows would actually pick for a
+	// destination); Find-NetRoute pipes back a mixed MSFT_NetIPAddress +
+	// MSFT_NetRoute pair, so the route object is picked out by CIM class.
+	b.WriteString("    $r = Find-NetRoute -RemoteIPAddress $ip -ErrorAction SilentlyContinue | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_NetRoute' } | Select-Object -First 1\n")
 	b.WriteString("    if ($null -ne $r) { $endpointRoutes += [pscustomobject]@{ IP = $ip; InterfaceIndex = $r.InterfaceIndex; NextHop = $r.NextHop } }\n")
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
@@ -119,15 +123,24 @@ func PowerShell(c Config) (string, error) {
 	if len(c.DNS) > 0 {
 		b.WriteString("Set-DnsClientServerAddress -InterfaceAlias $ifAlias -ServerAddresses @(" + psArray(c.DNS) + ")\n")
 	}
+	// Route setup after a previous session's leftover routes (chimera-helper
+	// always passes -setup-keep, i.e. fail-closed: routes are deliberately
+	// NOT restored if the tunnel dies unexpectedly) must be idempotent --
+	// every New-NetRoute below tolerates "already exists" (Windows error 87)
+	// with -ErrorAction SilentlyContinue, same as the Remove-NetRoute calls
+	// already do, instead of letting $ErrorActionPreference='Stop' kill the
+	// whole plan (and with it the just-started chimera.exe tun process) a
+	// few seconds after every reconnect that finds its own prior routes
+	// still in place.
 	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
 	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null\n")
-	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null\n")
+	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
+	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
 	b.WriteString("foreach ($r in $endpointRoutes) {\n")
 	b.WriteString("  $prefix = \"$($r.IP)/32\"\n")
 	b.WriteString("  Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue | Where-Object { $_.PolicyStore -eq 'ActiveStore' } | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("  if ($r.NextHop -and $r.NextHop -ne '0.0.0.0') { New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $r.InterfaceIndex -NextHop $r.NextHop -RouteMetric 1 -PolicyStore ActiveStore | Out-Null }\n")
-	b.WriteString("  else { New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $r.InterfaceIndex -RouteMetric 1 -PolicyStore ActiveStore | Out-Null }\n")
+	b.WriteString("  if ($r.NextHop -and $r.NextHop -ne '0.0.0.0') { New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $r.InterfaceIndex -NextHop $r.NextHop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null }\n")
+	b.WriteString("  else { New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $r.InterfaceIndex -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null }\n")
 	b.WriteString("}\n")
 	if c.Firewall || c.Killswitch {
 		b.WriteString("Get-NetFirewallRule -Group $fwGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n")

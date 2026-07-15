@@ -500,6 +500,7 @@ func tunCmd(args []string) {
 	setupKillswitch := fs.Bool("setup-killswitch", false, "block ALL outbound traffic except the TUN device, loopback, and the resolved endpoints (full killswitch, not just DNS)")
 	tunAddr := fs.String("tun-addr", winnet.DefaultAddressCIDR, "TUN IPv4 address/prefix for OS setup")
 	dns := fs.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers for OS setup")
+	statusFile := fs.String("status-file", "", "periodically write JSON tunnel stats (state/bytesUp/bytesDown/server/transport) to this path; empty disables")
 	verbose := fs.Bool("v", false, "verbose (debug) logging")
 	_ = fs.Parse(args)
 	setupLogger(*verbose)
@@ -570,7 +571,7 @@ func tunCmd(args []string) {
 	if *setupOS {
 		setupPtr = &setup
 	}
-	if err := runTUN(ctx, dialer, *dev, *mtu, setupPtr, *setupKeep); err != nil {
+	if err := runTUN(ctx, dialer, *dev, *mtu, setupPtr, *setupKeep, *statusFile, *srv, *transport); err != nil {
 		log.Fatalf("tun: %v", err)
 	}
 }

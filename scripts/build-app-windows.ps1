@@ -6,10 +6,16 @@ param(
 )
 
 # Builds the CHIMERA Windows tray app end to end:
-#   1. chimera.dll  (desktop/cffi, -buildmode=c-shared, needs CGO_ENABLED=1 + gcc)
-#   2. chimera.exe  (cmd/chimera CLI, bundled for the network protection toggle)
-#   3. flutter build windows (app/), which picks both up via app/windows/CMakeLists.txt
-#   4. copies the runnable bundle to chimera_tray/ at the repo root
+#   1. chimera.dll     (desktop/cffi, -buildmode=c-shared, needs CGO_ENABLED=1 + gcc)
+#   2. chimera.exe     (cmd/chimera CLI, bundled for the network protection toggle)
+#   3. chimera-helper.exe (cmd/chimera-helper, the persistent elevated Windows
+#      service that gives full-tunnel Connect a one-time UAC prompt instead
+#      of one per connect -- see internal/nethelper's doc comment)
+#   4. wintun.dll   (staged from third_party/wintun/ -- the driver binary
+#      chimera.exe's TUN device needs at runtime; see that directory's README)
+#   5. flutter build windows (app/), which picks all four up via
+#      app/windows/CMakeLists.txt
+#   6. copies the runnable bundle to chimera_tray/ at the repo root
 #
 # See docs/app/build-runbook.md for the manual step-by-step version and the
 # rationale (why c-shared not c-archive, why server/client need matching -Tags).
@@ -64,6 +70,12 @@ Invoke-Go build -buildvcs=false -buildmode=c-shared -tags $Tags -o app\windows\c
 Write-Host "==> Building chimera.exe (CLI, tags: $Tags)" -ForegroundColor Cyan
 $env:CGO_ENABLED = "0"
 Invoke-Go build -buildvcs=false -tags $Tags -o app\windows\chimera.exe .\cmd\chimera
+
+Write-Host "==> Building chimera-helper.exe (network helper service)" -ForegroundColor Cyan
+Invoke-Go build -buildvcs=false -o app\windows\chimera-helper.exe .\cmd\chimera-helper
+
+Write-Host "==> Staging wintun.dll (required for chimera tun to create the TUN device)" -ForegroundColor Cyan
+Copy-Item (Join-Path $repo "third_party\wintun\amd64\wintun.dll") "app\windows\wintun.dll" -Force
 
 Push-Location (Join-Path $repo "app")
 try {

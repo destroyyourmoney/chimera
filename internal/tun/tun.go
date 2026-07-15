@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync/atomic"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
 
@@ -34,6 +35,13 @@ type Bridge struct {
 	dev   wgtun.Device
 	stack *netstack.Stack
 	mtu   int
+
+	// bytesUp counts bytes read from the TUN device (outbound, i.e. system
+	// traffic entering the tunnel); bytesDown counts bytes written back to
+	// the device (inbound, from the remote server). Atomic: read from
+	// Stats() concurrently with the pump goroutines in Run.
+	bytesUp   uint64
+	bytesDown uint64
 }
 
 // Open creates TUN device `name` (empty = OS-assigned, e.g. utunN) with `mtu` and
@@ -57,6 +65,12 @@ func (b *Bridge) Name() string { n, _ := b.dev.Name(); return n }
 
 // MTU returns the device MTU.
 func (b *Bridge) MTU() int { return b.mtu }
+
+// Stats returns cumulative bytes moved so far: up (device -> stack, i.e.
+// outbound/uploaded) and down (stack -> device, i.e. inbound/downloaded).
+func (b *Bridge) Stats() (up, down uint64) {
+	return atomic.LoadUint64(&b.bytesUp), atomic.LoadUint64(&b.bytesDown)
+}
 
 // Run bridges packets until ctx is cancelled or the device errors.
 func (b *Bridge) Run(ctx context.Context) error {
@@ -87,6 +101,7 @@ func (b *Bridge) deviceToStack() error {
 			return err
 		}
 		for i := 0; i < n; i++ {
+			atomic.AddUint64(&b.bytesUp, uint64(sizes[i]))
 			b.stack.InjectInbound(bufs[i][tunHeadroom : tunHeadroom+sizes[i]])
 		}
 	}
@@ -104,6 +119,7 @@ func (b *Bridge) stackToDevice(ctx context.Context) {
 		if _, err := b.dev.Write([][]byte{buf}, tunHeadroom); err != nil {
 			return
 		}
+		atomic.AddUint64(&b.bytesDown, uint64(len(pkt)))
 	}
 }
 

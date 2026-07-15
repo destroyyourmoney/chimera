@@ -1,22 +1,29 @@
-// OS-level network protection toggle: shells out to the bundled chimera.exe
-// CLI's existing, already-tested `chimera tun -setup-firewall
-// [-setup-killswitch]`/`-setup-restore` machinery (internal/winnet) instead
-// of reimplementing firewall/elevation logic here. `-setup-elevate` makes the
-// CLI itself re-launch through the Windows UAC prompt
-// (internal/winnet.Elevate / ElevatePowerShell), so this file only assembles
-// the argument list -- one UAC prompt per enable/disable, no persistent
-// elevated service.
+// OS-level network protection toggle. Two backends:
 //
-// Two tiers, both requiring a real full-tunnel TUN device
-// (`-setup-os`) alongside the firewall rules, since the rules are scoped to
-// that TUN interface alias -- separate from the TUN-less SOCKS5 path the
-// rest of the tray app uses:
+//   1. chimera-helper (preferred): a persistent, already-elevated Windows
+//      service (see internal/nethelper's doc comment and
+//      nethelper_client.dart) that owns the actual TUN/routes/DNS/firewall
+//      setup. Once installed, enable/disable are a local authenticated TCP
+//      call with NO UAC prompt -- this is what lets a plain "Connect" bring
+//      up full-tunnel protection by default (main.dart's _connect) instead
+//      of staying SOCKS5-only.
+//   2. Direct CLI elevation (fallback): shells out to the bundled
+//      chimera.exe's `tun -setup-elevate -setup-os ...` machinery
+//      (internal/winnet), UAC-prompting on every single call. Used only
+//      when chimera-helper isn't installed yet, so the existing Settings
+//      toggle still works for anyone who hasn't opted into the helper.
+//
+// Both tiers require a real full-tunnel TUN device alongside the firewall
+// rules, since the rules are scoped to that TUN interface alias. The tray
+// app is TUN-only -- there is no SOCKS5 fallback -- so Connect always goes
+// through one of these two tiers:
 //   - [NetworkProtectionMode.dnsLeakGuard]: blocks outbound DNS on
 //     non-tunnel interfaces only.
 //   - [NetworkProtectionMode.killswitch]: blocks ALL outbound traffic except
 //     the TUN device, loopback, and the resolved server endpoints.
 import 'dart:io';
 
+import 'nethelper_client.dart';
 import 'settings_store.dart';
 
 class NetworkProtectionResult {
@@ -25,7 +32,63 @@ class NetworkProtectionResult {
   final String error;
 }
 
+/// NetworkProtectionController is the interface TunnelService (see
+/// chimera_service.dart) depends on for the TUN-only connect flow --
+/// factored out of the concrete NetworkProtection/NetHelperClient calls so
+/// tests can inject a fake instead of driving real chimera-helper IPC and
+/// process elevation.
+abstract class NetworkProtectionController {
+  Future<NetworkProtectionResult> engage({
+    required NetworkProtectionMode mode,
+    required String server,
+    required String pbk,
+    String sni = '',
+    String sid = '',
+    List<String> dns = kDefaultCustomDns,
+    String transport = '',
+  });
+  Future<void> disengage();
+
+  /// status reports the live state of a running tunnel (state/transport/
+  /// bytesUp/bytesDown), sourced from chimera-helper's ping (see
+  /// NetHelperClient.ping and internal/nethelper.Server.fillStats).
+  Future<NetHelperResult> status();
+}
+
+/// DefaultNetworkProtectionController wraps the real NetworkProtection
+/// static methods and NetHelperClient.ping.
+class DefaultNetworkProtectionController implements NetworkProtectionController {
+  @override
+  Future<NetworkProtectionResult> engage({
+    required NetworkProtectionMode mode,
+    required String server,
+    required String pbk,
+    String sni = '',
+    String sid = '',
+    List<String> dns = kDefaultCustomDns,
+    String transport = '',
+  }) => NetworkProtection.enable(
+    mode: mode,
+    server: server,
+    pbk: pbk,
+    sni: sni,
+    sid: sid,
+    dns: dns,
+    transport: transport,
+  );
+
+  @override
+  Future<void> disengage() async {
+    await NetworkProtection.disable();
+  }
+
+  @override
+  Future<NetHelperResult> status() => NetworkProtection._helper.ping();
+}
+
 class NetworkProtection {
+  static final NetHelperClient _helper = NetHelperClient();
+
   /// chimeraExePath resolves chimera.exe next to the running executable,
   /// same convention chimera.dll already uses (see chimera_bindings.dart).
   static String chimeraExePath() {
@@ -33,10 +96,72 @@ class NetworkProtection {
     return '$dir/chimera.exe';
   }
 
+  static String chimeraHelperExePath() {
+    final dir = File(Platform.resolvedExecutable).parent.path;
+    return '$dir/chimera-helper.exe';
+  }
+
   static Future<bool> isAvailable() => File(chimeraExePath()).exists();
 
+  /// isHelperInstalled reports whether chimera-helper is installed, running,
+  /// and reachable with this app's token -- i.e. whether enable()/disable()
+  /// below will be UAC-free.
+  static Future<bool> isHelperInstalled() async {
+    final result = await _helper.ping();
+    return result.ok;
+  }
+
+  /// installHelper registers and starts chimera-helper through one UAC
+  /// prompt (`Start-Process -Verb RunAs`, same elevation mechanism
+  /// internal/winnet.ElevatePowerShell already uses for the CLI fallback).
+  /// After this succeeds, enable()/disable() -- and therefore a plain
+  /// Connect -- no longer prompt for elevation.
+  static Future<NetworkProtectionResult> installHelper() async {
+    final exe = chimeraHelperExePath();
+    if (!await File(exe).exists()) {
+      return const NetworkProtectionResult(
+        ok: false,
+        error: 'chimera-helper.exe not found next to the app',
+      );
+    }
+    try {
+      // Start-Process -Verb RunAs -Wait: the same UAC-elevation pattern
+      // internal/winnet.ElevatePowerShell renders for the CLI, done here
+      // directly since chimera-helper.exe is a separate binary with no
+      // -setup-elevate flag of its own.
+      final psCommand =
+          "Start-Process -FilePath '$exe' -ArgumentList 'install' -Verb RunAs -Wait";
+      final result = await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        psCommand,
+      ]);
+      if (result.exitCode != 0) {
+        return NetworkProtectionResult(
+          ok: false,
+          error: (result.stderr as String).trim(),
+        );
+      }
+      // installService (Go side) waits for the service to reach Running
+      // before returning, but that's inside the elevated child; give the
+      // freshly-started service a moment to open its listener before the
+      // caller's first ping.
+      await Future.delayed(const Duration(milliseconds: 500));
+      final ok = await isHelperInstalled();
+      return NetworkProtectionResult(
+        ok: ok,
+        error: ok ? '' : 'helper installed but is not responding yet',
+      );
+    } catch (e) {
+      return NetworkProtectionResult(ok: false, error: e.toString());
+    }
+  }
+
   /// enable brings up a full-tunnel TUN device with the requested tier of
-  /// firewall protection installed, through one elevated UAC prompt.
+  /// firewall protection installed. UAC-free once chimera-helper is
+  /// installed; otherwise falls back to one elevated UAC prompt per call.
   static Future<NetworkProtectionResult> enable({
     required NetworkProtectionMode mode,
     required String server,
@@ -45,8 +170,31 @@ class NetworkProtection {
     String sid = '',
     String dev = '',
     List<String> dns = kDefaultCustomDns,
-  }) {
-    assert(mode != NetworkProtectionMode.off);
+    /// Anti-censorship transport: '', 'auto', 'quic', or 'tcp' -- matches
+    /// the per-server Mode a chimera:// link carries (see server_form.dart's
+    /// kTransportModes). Empty defers to chimera.exe tun's own "auto"
+    /// default. This is the TUN path's equivalent of Mullvad's obfuscation
+    /// method picker.
+    String transport = '',
+  }) async {
+    if (await isHelperInstalled()) {
+      final helperResult = await _helper.start(
+        server: server,
+        pbk: pbk,
+        mode: mode == NetworkProtectionMode.killswitch
+            ? 'killswitch'
+            : 'dnsLeakGuard',
+        sni: sni,
+        sid: sid,
+        dns: dns,
+        transport: transport,
+      );
+      return NetworkProtectionResult(
+        ok: helperResult.ok,
+        error: helperResult.error,
+      );
+    }
+
     final args = [
       'tun',
       '-setup-elevate',
@@ -62,24 +210,34 @@ class NetworkProtection {
       if (sid.isNotEmpty) ...['-sid', sid],
       if (dev.isNotEmpty) ...['-dev', dev],
       if (dns.isNotEmpty) ...['-dns', dns.join(',')],
+      if (transport.isNotEmpty) ...['-transport', transport],
     ];
-    return _run(args);
+    return _runCli(args);
   }
 
   /// disable restores routes/DNS and removes the firewall rules (including
   /// resetting the killswitch's DefaultOutboundAction override, unconditionally
-  /// -- see internal/winnet.RestorePowerShell), through one elevated UAC prompt.
-  static Future<NetworkProtectionResult> disable({String dev = ''}) {
+  /// -- see internal/winnet.RestorePowerShell). UAC-free once chimera-helper
+  /// is installed; otherwise one elevated UAC prompt per call.
+  static Future<NetworkProtectionResult> disable({String dev = ''}) async {
+    if (await isHelperInstalled()) {
+      final helperResult = await _helper.stop();
+      return NetworkProtectionResult(
+        ok: helperResult.ok,
+        error: helperResult.error,
+      );
+    }
+
     final args = [
       'tun',
       '-setup-elevate',
       '-setup-restore',
       if (dev.isNotEmpty) ...['-dev', dev],
     ];
-    return _run(args);
+    return _runCli(args);
   }
 
-  static Future<NetworkProtectionResult> _run(List<String> args) async {
+  static Future<NetworkProtectionResult> _runCli(List<String> args) async {
     final exe = chimeraExePath();
     if (!await File(exe).exists()) {
       return const NetworkProtectionResult(

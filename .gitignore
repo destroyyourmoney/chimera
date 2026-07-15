@@ -6,6 +6,7 @@
 # Go build outputs (scripts/build.sh, build.ps1 produce these)
 /bin/
 /chimera.exe
+/chimera-helper.exe
 
 # desktop/cffi generates these next to main.go via
 # `go build -buildmode=c-archive|c-shared` (see its doc comment)
@@ -20,6 +21,8 @@ desktop/cffi/chimera.dll
 app/windows/chimera.dll
 app/windows/chimera.exe
 app/windows/chimera.h
+app/windows/chimera-helper.exe
+app/windows/wintun.dll
 
 # Full `flutter build windows` output tree accidentally left at repo root --
 # the real Flutter project lives in app/; this is a disposable build product.

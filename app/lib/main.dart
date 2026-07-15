@@ -1,7 +1,8 @@
-// CHIMERA tray app (Windows): tray icon + Connect/Disconnect over the
-// TUN-less SOCKS5 fallback (desktop/cffi -> mobile.Tunnel -> internal/api;
-// a real elevated-helper per-app killswitch integration beyond the tiered
-// network-protection toggle, mobile targets, are later phases per
+// CHIMERA tray app (Windows): tray icon + Connect/Disconnect over a
+// full-tunnel TUN device (see chimera_service.dart's TunnelService and
+// network_protection.dart) -- no SOCKS5 fallback; a real elevated-helper
+// per-app killswitch integration beyond the tiered network-protection
+// toggle, and mobile targets, are later phases per
 // docs/app/build-runbook.md, not built here).
 // Settings hold a list of saved servers assembled into one
 // `#!chimera-subscription-v1` document, persisted locally; the tray menu and
@@ -13,7 +14,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:screen_retriever/screen_retriever.dart';
@@ -96,7 +96,7 @@ class HomePage extends StatefulWidget {
 enum _TrayIcon { disconnected, connected, error }
 
 class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
-  final _service = ChimeraService();
+  final _service = TunnelService();
   final _store = SettingsStore();
   ChimeraSettings _settings = ChimeraSettings();
   ChimeraState _state = ChimeraState.disconnected();
@@ -288,10 +288,53 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
     setState(() => _busy = true);
     try {
+      // Offer to install chimera-helper so this and future Connects don't
+      // UAC-prompt every time. Declining doesn't block Connect -- it just
+      // means NetworkProtection.enable (inside TunnelService.connect) falls
+      // back to one elevated CLI call per connect instead.
+      if (!_settings.nethelperDeclined &&
+          !await NetworkProtection.isHelperInstalled()) {
+        final install = await _offerNethelperInstall();
+        if (install == false) {
+          setState(() => _settings.nethelperDeclined = true);
+          await _persist();
+        } else if (install == true) {
+          final installResult = await NetworkProtection.installHelper();
+          if (!installResult.ok && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Could not install chimera-helper: ${installResult.error}',
+                ),
+              ),
+            );
+          }
+        }
+      }
+
+      final resolved = _resolvePrimaryServer();
+      if (!resolved.ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Connect failed: ${resolved.error}')),
+          );
+        }
+        return;
+      }
+
       final err = await _service.connect(
         _settings.subscriptionText(),
+        primaryServer: PrimaryServer(
+          host: resolved.host,
+          port: resolved.port,
+          pbk: resolved.pbk,
+          sni: resolved.sni,
+          sid: resolved.sid,
+          transport: resolved.transport,
+        ),
         signKeyHex: _settings.signKeyHex,
-        listen: _settings.listenAddr,
+        mode: _settings.networkProtection,
+        dns: _settings.customDns,
       );
       if (err != null && mounted) {
         ScaffoldMessenger.of(
@@ -301,6 +344,88 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Returns true (install), false (skip, remember the choice), or null
+  /// (dialog dismissed without an explicit choice -- ask again next Connect).
+  Future<bool?> _offerNethelperInstall() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enable full VPN protection?'),
+        content: const Text(
+          'CHIMERA can install a small background helper (one-time, needs '
+          'administrator approval) so Connect can bring up the tunnel '
+          'without an administrator prompt every time. Skipping this still '
+          'lets you connect -- it just asks for approval on every Connect.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Skip'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Install'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Parses the first saved server's link into the fields
+  /// NetworkProtection.enable needs -- the same "primary server" convention
+  /// both _connect and the Settings hub's manual toggle use. Includes the
+  /// link's own transport Mode ('', 'auto', 'quic', or 'tcp') so the
+  /// TUN device actually uses whichever anti-censorship transport the
+  /// server was configured with (see server_form.dart's kTransportModes),
+  /// instead of always defaulting to chimera.exe tun's own "auto".
+  ({bool ok, String error, String host, String port, String pbk, String sni, String sid, String transport})
+  _resolvePrimaryServer() {
+    if (_settings.servers.isEmpty) {
+      return (
+        ok: false,
+        error: 'no saved servers',
+        host: '',
+        port: '',
+        pbk: '',
+        sni: '',
+        sid: '',
+        transport: '',
+      );
+    }
+    final primary = _settings.servers.first;
+    final bindings = ChimeraBindings.open();
+    final env = jsonDecode(bindings.parseLink(primary.link)) as Map<String, dynamic>;
+    final err = env['error'] as String? ?? '';
+    if (err.isNotEmpty) {
+      return (
+        ok: false,
+        error: err,
+        host: '',
+        port: '',
+        pbk: '',
+        sni: '',
+        sid: '',
+        transport: '',
+      );
+    }
+    final p = jsonDecode(env['result'] as String) as Map<String, dynamic>;
+    return (
+      ok: true,
+      error: '',
+      host: p['Host'] as String? ?? '',
+      port: p['Port'] as String? ?? '',
+      pbk: p['Pbk'] as String? ?? '',
+      sni: p['Sni'] as String? ?? '',
+      sid: p['Sid'] as String? ?? '',
+      // The global override (Settings > Anti-censorship) wins when the
+      // user has picked something other than "auto"; "auto" defers to
+      // whatever this server's own link encodes.
+      transport: _settings.transport != 'auto'
+          ? _settings.transport
+          : (p['Mode'] as String? ?? ''),
+    );
   }
 
   Future<void> _toggleConnection() async {
@@ -338,6 +463,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           onToggleAutostart: _toggleAutostart,
           onSetNetworkProtection: _setNetworkProtection,
           onSetCustomDns: _setCustomDns,
+          onSetTransport: _setTransport,
           buildDiagnosticsReport: _buildDiagnosticsReport,
           onDisconnectAndQuit: _disconnectAndQuit,
         ),
@@ -356,12 +482,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
-  /// Turns OS-level network protection off, or on at the requested tier,
-  /// against the first saved server -- same "primary server" convention the
-  /// old DNS-leak-guard toggle used. Requires one elevated UAC prompt either
-  /// way (`NetworkProtection.enable`/`disable`).
+  /// Switches the network-protection tier against the first saved server --
+  /// same "primary server" convention _connect uses. UAC-free once
+  /// chimera-helper is installed (see NetworkProtection.enable); otherwise
+  /// one elevated UAC prompt per call. There's no "off" tier anymore -- the
+  /// app is TUN-only, so this always brings the tunnel up at the chosen
+  /// tier, live, independent of whether Connect/Disconnect has been pressed.
   Future<void> _setNetworkProtection(NetworkProtectionMode mode) async {
-    if (mode != NetworkProtectionMode.off && _settings.servers.isEmpty) {
+    if (_settings.servers.isEmpty) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Add a server first')));
@@ -369,30 +497,18 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
     setState(() => _busy = true);
     try {
-      NetworkProtectionResult result;
-      if (mode == NetworkProtectionMode.off) {
-        result = await NetworkProtection.disable();
-      } else {
-        final primary = _settings.servers.first;
-        final bindings = ChimeraBindings.open();
-        final env =
-            jsonDecode(bindings.parseLink(primary.link))
-                as Map<String, dynamic>;
-        final err = env['error'] as String? ?? '';
-        if (err.isNotEmpty) {
-          result = NetworkProtectionResult(ok: false, error: err);
-        } else {
-          final p = jsonDecode(env['result'] as String) as Map<String, dynamic>;
-          result = await NetworkProtection.enable(
-            mode: mode,
-            server: '${p['Host']}:${p['Port']}',
-            pbk: p['Pbk'] as String? ?? '',
-            sni: p['Sni'] as String? ?? '',
-            sid: p['Sid'] as String? ?? '',
-            dns: _settings.customDns,
-          );
-        }
-      }
+      final resolved = _resolvePrimaryServer();
+      final result = resolved.ok
+          ? await NetworkProtection.enable(
+              mode: mode,
+              server: '${resolved.host}:${resolved.port}',
+              pbk: resolved.pbk,
+              sni: resolved.sni,
+              sid: resolved.sid,
+              dns: _settings.customDns,
+              transport: resolved.transport,
+            )
+          : NetworkProtectionResult(ok: false, error: resolved.error);
       if (result.ok) {
         setState(() => _settings.networkProtection = mode);
         await _persist();
@@ -411,6 +527,16 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     await _persist();
   }
 
+  /// Sets the global anti-censorship transport override (see
+  /// anti_censorship_page.dart and settings_store.dart's
+  /// ChimeraSettings.transport doc comment). Just a local preference --
+  /// unlike _setNetworkProtection it doesn't touch the tunnel itself, it
+  /// only takes effect on the next Connect/re-engage.
+  Future<void> _setTransport(String transport) async {
+    setState(() => _settings.transport = transport);
+    await _persist();
+  }
+
   String _buildDiagnosticsReport() => Diagnostics.buildReport(
     settings: _settings,
     state: _state,
@@ -424,13 +550,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     _service.dispose();
     await trayManager.destroy();
     exit(0);
-  }
-
-  void _copySocksAddress() {
-    Clipboard.setData(ClipboardData(text: 'socks5://${_settings.listenAddr}'));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Copied ${_settings.listenAddr}')));
   }
 
   /// Best-effort SNI (fallback: host) of the primary server, for the
@@ -595,8 +714,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
             _buildStatusCard(context, tokens),
             const SizedBox(height: 20),
             _buildSectionLabel(context, tokens, 'Quick access'),
-            const SizedBox(height: 8),
-            _buildSocksChip(context, tokens),
             const SizedBox(height: 8),
             _buildNavRow(
               context,
@@ -841,37 +958,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         fontWeight: FontWeight.w600,
         letterSpacing: 0.6,
         color: tokens.textFaint,
-      ),
-    );
-  }
-
-  Widget _buildSocksChip(BuildContext context, ChimeraTokens tokens) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(11),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'socks5://${_settings.listenAddr}',
-              overflow: TextOverflow.ellipsis,
-              style: monoStyle(
-                fontSize: 12.5,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.copy_outlined, size: 16),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
-            onPressed: _copySocksAddress,
-            tooltip: 'Copy SOCKS address',
-          ),
-        ],
       ),
     );
   }

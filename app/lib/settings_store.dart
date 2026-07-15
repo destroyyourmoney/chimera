@@ -98,23 +98,26 @@ class SplitTunnelApp {
 enum SplitTunnelMode { include, exclude }
 
 /// Tiered OS-level network protection, applied through the elevated
-/// `chimera tun -setup-os ...` helper (see `network_protection.dart`):
-///  - [off]: no elevated helper, TUN-less SOCKS5 only.
+/// `chimera tun -setup-os ...` helper (see `network_protection.dart`).
+/// The tray app is TUN-only (no SOCKS5 fallback), so [dnsLeakGuard] is the
+/// floor -- there's no "off" tier anymore, since with no SOCKS path a
+/// disabled TUN device would mean no connection at all:
 ///  - [dnsLeakGuard]: blocks outbound DNS (UDP/TCP 53) on non-tunnel
 ///    interfaces only (`internal/winnet` `Firewall`).
 ///  - [killswitch]: blocks ALL outbound traffic except the TUN device,
 ///    loopback, and the resolved server endpoints (`internal/winnet`
 ///    `Killswitch`) -- DNS is covered as a side effect of the full block.
-enum NetworkProtectionMode { off, dnsLeakGuard, killswitch }
+enum NetworkProtectionMode { dnsLeakGuard, killswitch }
 
 NetworkProtectionMode _networkProtectionModeFromJson(String? v) {
   switch (v) {
     case 'killswitch':
       return NetworkProtectionMode.killswitch;
-    case 'dnsLeakGuard':
-      return NetworkProtectionMode.dnsLeakGuard;
+    // Absent key, 'dnsLeakGuard', or a stored 'off' from a settings file
+    // saved before SOCKS5 was removed all migrate to the same floor tier --
+    // 'off' has no meaning anymore now that TUN is the only connect path.
     default:
-      return NetworkProtectionMode.off;
+      return NetworkProtectionMode.dnsLeakGuard;
   }
 }
 
@@ -124,12 +127,19 @@ String _networkProtectionModeToJson(NetworkProtectionMode m) {
       return 'killswitch';
     case NetworkProtectionMode.dnsLeakGuard:
       return 'dnsLeakGuard';
-    case NetworkProtectionMode.off:
-      return 'off';
   }
 }
 
 const kDefaultCustomDns = ['1.1.1.1', '8.8.8.8'];
+
+/// Anti-censorship transport values this app understands, mirroring
+/// server_form.dart's kTransportModes (kept as a separate constant there
+/// since that file is about a single server's own link, not the global
+/// override below).
+const kGlobalTransportModes = ['auto', 'quic', 'tcp'];
+
+String _transportFromJson(String? v) =>
+    kGlobalTransportModes.contains(v) ? v! : 'auto';
 
 /// Persisted split-tunnel selection (docs/app/platform-features.md §2).
 /// This is the picker's state only -- on the desktop tray (TUN-less SOCKS5,
@@ -175,12 +185,13 @@ class ChimeraSettings {
   ChimeraSettings({
     List<ServerEntry>? servers,
     this.signKeyHex = '',
-    this.listenAddr = '127.0.0.1:1080',
     this.autostart = false,
-    this.networkProtection = NetworkProtectionMode.off,
+    this.networkProtection = NetworkProtectionMode.dnsLeakGuard,
+    this.transport = 'auto',
     List<String>? customDns,
     this.lastConnectedServerId,
     SplitTunnelSettings? splitTunnel,
+    this.nethelperDeclined = false,
   }) : servers = servers ?? [],
        customDns = customDns ?? List.of(kDefaultCustomDns),
        splitTunnel = splitTunnel ?? SplitTunnelSettings();
@@ -194,37 +205,50 @@ class ChimeraSettings {
           .map((e) => ServerEntry.fromJson(e as Map<String, dynamic>))
           .toList(),
       signKeyHex: json['signKeyHex'] as String? ?? '',
-      listenAddr: json['listenAddr'] as String? ?? '127.0.0.1:1080',
       autostart: json['autostart'] as bool? ?? false,
       networkProtection: _networkProtectionModeFromJson(
         json['networkProtection'] as String?,
       ),
+      transport: _transportFromJson(json['transport'] as String?),
       customDns: rawDns?.map((e) => e as String).toList(),
       lastConnectedServerId: json['lastConnectedServerId'] as String?,
       splitTunnel: rawSplitTunnel == null
           ? null
           : SplitTunnelSettings.fromJson(rawSplitTunnel),
+      nethelperDeclined: json['nethelperDeclined'] as bool? ?? false,
     );
   }
 
   final List<ServerEntry> servers;
   String signKeyHex;
-  String listenAddr;
   bool autostart;
   NetworkProtectionMode networkProtection;
+
+  /// Global anti-censorship transport override ('auto'|'quic'|'tcp') -- see
+  /// anti_censorship_page.dart. 'auto' defers to whatever each server's own
+  /// link encodes (server_form.dart's per-link Mode); 'quic'/'tcp' force
+  /// that transport regardless of what the connecting server's link says.
+  String transport;
   List<String> customDns;
   String? lastConnectedServerId;
   SplitTunnelSettings splitTunnel;
 
+  /// Set once the user dismisses the "enable full VPN protection" onboarding
+  /// prompt (see main.dart's _connect) without installing chimera-helper, so
+  /// Connect stops asking every time -- they can still turn it on later from
+  /// Settings, which always offers the install regardless of this flag.
+  bool nethelperDeclined;
+
   Map<String, dynamic> toJson() => {
     'servers': servers.map((s) => s.toJson()).toList(),
     'signKeyHex': signKeyHex,
-    'listenAddr': listenAddr,
     'autostart': autostart,
     'networkProtection': _networkProtectionModeToJson(networkProtection),
+    'transport': transport,
     'customDns': customDns,
     'lastConnectedServerId': lastConnectedServerId,
     'splitTunnel': splitTunnel.toJson(),
+    'nethelperDeclined': nethelperDeclined,
   };
 
   /// subscriptionText assembles all saved servers into one
