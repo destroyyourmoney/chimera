@@ -52,9 +52,20 @@ func (r *procRunner) Start(req nethelper.Request) error {
 	defer r.mu.Unlock()
 
 	// A new Start while one is already running is a "switch server/mode"
-	// request: stop the old tunnel first rather than leaving two fighting
-	// over the same TUN device name.
+	// request, OR the app's own reconnect watchdog re-engaging after a
+	// dropped tunnel WITHOUT ever calling Stop() first (chimera_service.dart's
+	// _scheduleReconnect calls _connectOnce directly, skipping _teardown).
+	// Either way, killing the old process alone is not enough: it leaves
+	// that session's routes/DNS/NRPT/firewall state applied, and the next
+	// `-setup-os` below layers a fresh config on top of it instead of a
+	// clean slate -- exactly what turned "connected" into "DNS resolves to
+	// nothing" after a reconnect. Restore before proceeding, same as Stop().
+	wasRunning := r.cmd != nil
+	prevServer := r.lastServer
 	r.stopLocked()
+	if wasRunning {
+		r.restoreLocked(prevServer)
+	}
 	r.lastServer = req.Server
 
 	exe, err := chimeraExePath()
@@ -165,23 +176,29 @@ func (r *procRunner) Stop() error {
 	// without us noticing. Restore errors (e.g. the TUN adapter is already
 	// gone) are logged, not surfaced -- see nethelper.Server.Handle's doc
 	// comment on why Stop is best-effort from the caller's perspective.
+	r.restoreLocked(r.lastServer)
+	return nil
+}
+
+// restoreLocked runs `chimera.exe tun -setup-restore` to undo whatever routes
+// /DNS/NRPT/firewall state a previous session applied. Caller must hold r.mu.
+func (r *procRunner) restoreLocked(server string) {
 	exe, err := chimeraExePath()
 	if err != nil {
 		slog.Warn("chimera-helper: restore skipped, could not resolve chimera.exe", "err", err)
-		return nil
+		return
 	}
 	restoreArgs := []string{"tun", "-setup-restore"}
-	if r.lastServer != "" {
+	if server != "" {
 		// Without -server, tunCmd's setupBase.Endpoints is empty and
 		// RestorePowerShell never removes the endpoint /32 route pins added
 		// at connect time -- see the lastServer field doc comment.
-		restoreArgs = append(restoreArgs, "-server", r.lastServer)
+		restoreArgs = append(restoreArgs, "-server", server)
 	}
 	out, err := exec.Command(exe, restoreArgs...).CombinedOutput()
 	if err != nil {
 		slog.Warn("chimera-helper: restore reported an error (often harmless, e.g. nothing to restore)", "err", err, "output", string(out))
 	}
-	return nil
 }
 
 // stopLocked kills the tracked child, if any, and waits for its Wait()

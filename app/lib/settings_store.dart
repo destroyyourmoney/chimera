@@ -132,15 +132,6 @@ String _networkProtectionModeToJson(NetworkProtectionMode m) {
 
 const kDefaultCustomDns = ['1.1.1.1', '8.8.8.8'];
 
-/// Anti-censorship transport values this app understands, mirroring
-/// server_form.dart's kTransportModes (kept as a separate constant there
-/// since that file is about a single server's own link, not the global
-/// override below).
-const kGlobalTransportModes = ['auto', 'quic', 'tcp'];
-
-String _transportFromJson(String? v) =>
-    kGlobalTransportModes.contains(v) ? v! : 'auto';
-
 /// Persisted split-tunnel selection (docs/app/platform-features.md §2).
 /// This is the picker's state only -- on the desktop tray (TUN-less SOCKS5,
 /// see `main.dart` header comment) there is no OS-level enforcement yet, so
@@ -187,7 +178,6 @@ class ChimeraSettings {
     this.signKeyHex = '',
     this.autostart = false,
     this.networkProtection = NetworkProtectionMode.dnsLeakGuard,
-    this.transport = 'auto',
     List<String>? customDns,
     this.lastConnectedServerId,
     SplitTunnelSettings? splitTunnel,
@@ -209,7 +199,6 @@ class ChimeraSettings {
       networkProtection: _networkProtectionModeFromJson(
         json['networkProtection'] as String?,
       ),
-      transport: _transportFromJson(json['transport'] as String?),
       customDns: rawDns?.map((e) => e as String).toList(),
       lastConnectedServerId: json['lastConnectedServerId'] as String?,
       splitTunnel: rawSplitTunnel == null
@@ -223,12 +212,6 @@ class ChimeraSettings {
   String signKeyHex;
   bool autostart;
   NetworkProtectionMode networkProtection;
-
-  /// Global anti-censorship transport override ('auto'|'quic'|'tcp') -- see
-  /// anti_censorship_page.dart. 'auto' defers to whatever each server's own
-  /// link encodes (server_form.dart's per-link Mode); 'quic'/'tcp' force
-  /// that transport regardless of what the connecting server's link says.
-  String transport;
   List<String> customDns;
   String? lastConnectedServerId;
   SplitTunnelSettings splitTunnel;
@@ -244,7 +227,6 @@ class ChimeraSettings {
     'signKeyHex': signKeyHex,
     'autostart': autostart,
     'networkProtection': _networkProtectionModeToJson(networkProtection),
-    'transport': transport,
     'customDns': customDns,
     'lastConnectedServerId': lastConnectedServerId,
     'splitTunnel': splitTunnel.toJson(),

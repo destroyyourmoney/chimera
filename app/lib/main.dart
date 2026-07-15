@@ -419,12 +419,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       pbk: p['Pbk'] as String? ?? '',
       sni: p['Sni'] as String? ?? '',
       sid: p['Sid'] as String? ?? '',
-      // The global override (Settings > Anti-censorship) wins when the
-      // user has picked something other than "auto"; "auto" defers to
-      // whatever this server's own link encodes.
-      transport: _settings.transport != 'auto'
-          ? _settings.transport
-          : (p['Mode'] as String? ?? ''),
+      transport: p['Mode'] as String? ?? '',
     );
   }
 
@@ -463,7 +458,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           onToggleAutostart: _toggleAutostart,
           onSetNetworkProtection: _setNetworkProtection,
           onSetCustomDns: _setCustomDns,
-          onSetTransport: _setTransport,
           buildDiagnosticsReport: _buildDiagnosticsReport,
           onDisconnectAndQuit: _disconnectAndQuit,
         ),
@@ -525,16 +519,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
   Future<void> _setCustomDns(List<String> dns) async {
     setState(() => _settings.customDns = dns);
-    await _persist();
-  }
-
-  /// Sets the global anti-censorship transport override (see
-  /// anti_censorship_page.dart and settings_store.dart's
-  /// ChimeraSettings.transport doc comment). Just a local preference --
-  /// unlike _setNetworkProtection it doesn't touch the tunnel itself, it
-  /// only takes effect on the next Connect/re-engage.
-  Future<void> _setTransport(String transport) async {
-    setState(() => _settings.transport = transport);
     await _persist();
   }
 

@@ -34,7 +34,6 @@ void main() {
         signKeyHex: 'deadbeef',
         autostart: true,
         networkProtection: NetworkProtectionMode.killswitch,
-        transport: 'quic',
         customDns: ['9.9.9.9'],
         lastConnectedServerId: '1',
       );
@@ -45,7 +44,6 @@ void main() {
       expect(decoded.signKeyHex, 'deadbeef');
       expect(decoded.autostart, true);
       expect(decoded.networkProtection, NetworkProtectionMode.killswitch);
-      expect(decoded.transport, 'quic');
       expect(decoded.customDns, ['9.9.9.9']);
       expect(decoded.lastConnectedServerId, '1');
     });
@@ -60,7 +58,6 @@ void main() {
       // default -- the floor tier, since the app is TUN-only and there's no
       // "off" anymore. See _networkProtectionModeFromJson's doc comment.
       expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
-      expect(decoded.transport, 'auto');
       expect(decoded.customDns, kDefaultCustomDns);
       expect(decoded.lastConnectedServerId, isNull);
     });
@@ -68,20 +65,6 @@ void main() {
     test('fromJson migrates a settings file saved before SOCKS5 removal ("off") to dnsLeakGuard', () {
       final decoded = ChimeraSettings.fromJson({'networkProtection': 'off'});
       expect(decoded.networkProtection, NetworkProtectionMode.dnsLeakGuard);
-    });
-
-    test('transport round-trips quic and tcp', () {
-      for (final t in ['quic', 'tcp']) {
-        final decoded = ChimeraSettings.fromJson(
-          ChimeraSettings(transport: t).toJson(),
-        );
-        expect(decoded.transport, t);
-      }
-    });
-
-    test('fromJson treats an unknown transport string as auto', () {
-      final decoded = ChimeraSettings.fromJson({'transport': 'garbage'});
-      expect(decoded.transport, 'auto');
     });
 
     test('networkProtection round-trips dnsLeakGuard mode too', () {
