@@ -197,3 +197,135 @@ func TestNetstackUDPForward(t *testing.T) {
 		t.Fatalf("udp echo = %q, want %q", got[:n], msg)
 	}
 }
+
+// fakeUDPCarrierMulti models a real multi-association carrier (like the
+// server's datagramMux, internal/quic/datagram.go): every OpenAssoc call
+// gets its own fresh assocID instead of the single-flow fake's fixed "1", so
+// a test can drive multiple concurrent flows through one carrier and prove
+// the dispatch loop demuxes them correctly by assocID.
+type fakeUDPCarrierMulti struct {
+	mu        sync.Mutex
+	nextID    uint16
+	in        chan multiDatagram
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+type multiDatagram struct {
+	assoc   uint16
+	payload []byte
+}
+
+func newFakeUDPCarrierMulti() *fakeUDPCarrierMulti {
+	return &fakeUDPCarrierMulti{in: make(chan multiDatagram, 32), done: make(chan struct{})}
+}
+
+func (f *fakeUDPCarrierMulti) OpenAssoc(string, uint16) (uint16, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	return f.nextID, nil
+}
+
+func (f *fakeUDPCarrierMulti) Send(assoc uint16, payload []byte) error {
+	select {
+	case f.in <- multiDatagram{assoc: assoc, payload: append([]byte(nil), payload...)}:
+	case <-f.done:
+	}
+	return nil
+}
+
+func (f *fakeUDPCarrierMulti) Receive(ctx context.Context) (uint16, []byte, error) {
+	select {
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	case <-f.done:
+		return 0, nil, io.EOF
+	case d := <-f.in:
+		return d.assoc, d.payload, nil
+	}
+}
+
+func (f *fakeUDPCarrierMulti) Close() error {
+	f.closeOnce.Do(func() { close(f.done) })
+	return nil
+}
+
+// countingUDPDialer counts DialUDPCarrier calls -- the regression this test
+// guards against is that count climbing past 1 with multiple concurrent
+// flows, i.e. netstack going back to dialing a fresh carrier (a full QUIC
+// connection + Reality handshake, on the real carrier) per flow instead of
+// reusing one shared carrier via OpenAssoc. See ensureUDPCarrier's doc
+// comment in netstack.go for why that regression is exactly what broke DNS.
+type countingUDPDialer struct {
+	mu    sync.Mutex
+	count int
+	c     *fakeUDPCarrierMulti
+}
+
+func (d *countingUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
+	d.mu.Lock()
+	d.count++
+	d.mu.Unlock()
+	return d.c, nil
+}
+
+func TestNetstackUDPForward_SharesOneCarrierAcrossFlows(t *testing.T) {
+	fc := newFakeUDPCarrierMulti()
+	dialer := &countingUDPDialer{c: fc}
+	ns, err := New(&fakeTCPDialer{}, dialer)
+	if err != nil {
+		t.Fatalf("new stack: %v", err)
+	}
+	defer ns.Close()
+	ns.addClientAddr(t, [4]byte{10, 0, 0, 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go ns.loopback(ctx)
+
+	laddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 1})}
+	dial := func(port uint16) *gonet.UDPConn {
+		t.Helper()
+		raddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 53}), Port: port}
+		conn, err := gonet.DialUDP(ns.stack, &laddr, &raddr, ipv4.ProtocolNumber)
+		if err != nil {
+			t.Fatalf("dial udp through netstack: %v", err)
+		}
+		return conn
+	}
+	roundtrip := func(conn *gonet.UDPConn, msg string) {
+		t.Helper()
+		if _, err := conn.Write([]byte(msg)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		got := make([]byte, 1500)
+		n, err := conn.Read(got)
+		if err != nil {
+			t.Fatalf("read echo: %v", err)
+		}
+		if string(got[:n]) != msg {
+			t.Fatalf("udp echo = %q, want %q", got[:n], msg)
+		}
+	}
+
+	// Two distinct UDP flows (different destination ports -> different
+	// gVisor forwarder requests, same shape as two DNS queries from
+	// different ephemeral source sockets) -- the bug this guards against
+	// dialed a fresh carrier for each one of these.
+	conn1 := dial(53)
+	defer conn1.Close()
+	conn2 := dial(5353)
+	defer conn2.Close()
+
+	roundtrip(conn1, "query-a")
+	roundtrip(conn2, "query-b")
+
+	dialer.mu.Lock()
+	got := dialer.count
+	dialer.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("DialUDPCarrier called %d times across 2 flows, want exactly 1 (flows must share one carrier)", got)
+	}
+}

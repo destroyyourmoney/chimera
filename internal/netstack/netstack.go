@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -46,6 +47,7 @@ const (
 	channelQueue  = 512
 	tcpMaxInFlight = 1024
 	udpReadBuf    = 64 * 1024
+	udpFlowQueue  = 64 // per-flow inbound buffer once demuxed off the shared carrier
 )
 
 // TCPDialer bridges a TCP flow's original destination to a carrier stream.
@@ -67,6 +69,18 @@ type Stack struct {
 	ep    *channel.Endpoint
 	tcp   TCPDialer
 	udp   UDPDialer
+
+	udpCtx    context.Context
+	udpCancel context.CancelFunc
+
+	// udpMu guards udpCarrier: the shared, lazily-dialed UDP carrier every
+	// flow's association is opened on (see ensureUDPCarrier's doc comment for
+	// why a fresh carrier per flow was the bug this replaced).
+	udpMu      sync.Mutex
+	udpCarrier carrier.UDPCarrier
+	// udpFlows demuxes the one shared carrier's Receive loop back to each
+	// flow's own inbound channel by assocID.
+	udpFlows sync.Map // assocID uint16 -> chan []byte
 }
 
 // New builds the stack and installs the TCP/UDP forwarders. tcp is required; udp
@@ -88,7 +102,8 @@ func New(tcpDialer TCPDialer, udpDialer UDPDialer) (*Stack, error) {
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
 
-	ns := &Stack{stack: s, ep: ep, tcp: tcpDialer, udp: udpDialer}
+	udpCtx, udpCancel := context.WithCancel(context.Background())
+	ns := &Stack{stack: s, ep: ep, tcp: tcpDialer, udp: udpDialer, udpCtx: udpCtx, udpCancel: udpCancel}
 
 	tcpFwd := tcp.NewForwarder(s, 0, tcpMaxInFlight, ns.handleTCP)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
@@ -126,10 +141,17 @@ func (s *Stack) ReadOutbound(ctx context.Context) []byte {
 	return buf.Flatten()
 }
 
-// Close tears down the stack and its endpoint.
+// Close tears down the stack, its endpoint, and the shared UDP carrier (if
+// one was ever dialed).
 func (s *Stack) Close() {
 	s.ep.Close()
 	s.stack.Close()
+	s.udpCancel()
+	s.udpMu.Lock()
+	if s.udpCarrier != nil {
+		_ = s.udpCarrier.Close()
+	}
+	s.udpMu.Unlock()
 }
 
 // handleTCP relays one inbound TCP flow to its original destination via the carrier.
@@ -181,22 +203,92 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) bool {
 	return true
 }
 
-// relayUDP bridges one UDP flow to a carrier association. (One carrier per flow for
-// now; a shared carrier with assocID demux is a later optimization.)
+// ensureUDPCarrier returns the shared UDP carrier, dialing it on the first
+// call and reusing it for every later flow.
+//
+// The original version dialed a fresh carrier per flow, i.e. a brand-new
+// QUIC connection (full handshake + Reality auth) for every single UDP flow
+// netstack sees -- in practice one per DNS query, since a typical resolver
+// opens a new ephemeral UDP socket per lookup. That serialized a full
+// connection setup in front of every DNS response, comfortably blowing past
+// a resolver's few-second timeout, and made every lookup depend on QUIC/UDP
+// actually reaching the server even when TCP transport was selected
+// (defaultUDPDial forces QUIC because datagrams require it) -- exactly what
+// showed up as "connected, but no site loads" / ERR_NAME_NOT_RESOLVED.
+//
+// carrier.UDPCarrier was already designed to multiplex many associations
+// over one connection (OpenAssoc returns a per-flow assocID; the server's
+// datagramMux, see internal/quic/datagram.go, already dials/dispatches per
+// assocID on a single connection) -- this just makes the client actually use
+// that instead of paying a fresh connection per flow.
+func (s *Stack) ensureUDPCarrier() (carrier.UDPCarrier, error) {
+	s.udpMu.Lock()
+	defer s.udpMu.Unlock()
+	if s.udpCarrier != nil {
+		return s.udpCarrier, nil
+	}
+	uc, err := s.udp.DialUDPCarrier()
+	if err != nil {
+		return nil, err
+	}
+	s.udpCarrier = uc
+	go s.udpDispatchLoop(uc)
+	return uc, nil
+}
+
+// udpDispatchLoop is the single reader of the shared carrier's Receive
+// stream: it demuxes inbound datagrams by assocID out to each flow's own
+// channel (registered in udpFlows by relayUDP). Runs until the carrier
+// errors/closes, at which point every still-registered flow is woken (its
+// channel closed) so relayUDP's loop returns instead of blocking forever,
+// and the carrier is dropped so the next flow dials a fresh one.
+func (s *Stack) udpDispatchLoop(uc carrier.UDPCarrier) {
+	for {
+		assoc, payload, err := uc.Receive(s.udpCtx)
+		if err != nil {
+			s.udpMu.Lock()
+			if s.udpCarrier == uc {
+				s.udpCarrier = nil
+			}
+			s.udpMu.Unlock()
+			s.udpFlows.Range(func(key, value any) bool {
+				close(value.(chan []byte))
+				s.udpFlows.Delete(key)
+				return true
+			})
+			return
+		}
+		if ch, ok := s.udpFlows.Load(assoc); ok {
+			select {
+			case ch.(chan []byte) <- payload:
+			default:
+				// Flow's inbound buffer is full; drop (UDP semantics -- the
+				// alternative is blocking the one shared dispatch loop and
+				// stalling every other flow behind a slow reader).
+			}
+		}
+	}
+}
+
+// relayUDP bridges one UDP flow to an association on the shared carrier (see
+// ensureUDPCarrier).
 func (s *Stack) relayUDP(local *gonet.UDPConn, host string, port uint16) {
 	defer local.Close()
 
-	uc, err := s.udp.DialUDPCarrier()
+	uc, err := s.ensureUDPCarrier()
 	if err != nil {
 		slog.Debug("netstack udp: carrier dial failed", "err", err)
 		return
 	}
-	defer uc.Close()
 	assoc, err := uc.OpenAssoc(host, port)
 	if err != nil {
 		slog.Debug("netstack udp: open assoc failed", "target", host, "port", port, "err", err)
 		return
 	}
+
+	inbound := make(chan []byte, udpFlowQueue)
+	s.udpFlows.Store(assoc, inbound)
+	defer s.udpFlows.Delete(assoc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -217,14 +309,18 @@ func (s *Stack) relayUDP(local *gonet.UDPConn, host string, port uint16) {
 		}
 	}()
 
-	// carrier → local
+	// carrier → local, demuxed by udpDispatchLoop into our own inbound channel.
 	for {
-		_, payload, err := uc.Receive(ctx)
-		if err != nil {
+		select {
+		case <-ctx.Done():
 			return
-		}
-		if _, err := local.Write(payload); err != nil {
-			return
+		case payload, ok := <-inbound:
+			if !ok {
+				return // udpDispatchLoop closed us: the shared carrier died
+			}
+			if _, err := local.Write(payload); err != nil {
+				return
+			}
 		}
 	}
 }
