@@ -5,6 +5,8 @@ package netstack
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -101,6 +103,15 @@ type fakeUDPDialer struct{ c *fakeUDPCarrier }
 
 func (d fakeUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) { return d.c, nil }
 
+// failingUDPDialer models a client that has no QUIC support (or an
+// unreachable QUIC endpoint): every DialUDPCarrier call fails, same as
+// defaultUDPDial's errNoUDP in internal/endpoint/pool.go.
+type failingUDPDialer struct{}
+
+func (failingUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
+	return nil, errors.New("no udp carrier")
+}
+
 // --- helpers ---
 
 func startTCPEcho(t *testing.T) string {
@@ -117,6 +128,46 @@ func startTCPEcho(t *testing.T) string {
 				return
 			}
 			go func() { _, _ = io.Copy(c, c); _ = c.Close() }()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// startDNSOverTCPEcho listens for RFC 1035 §4.2.2-framed messages (2-byte
+// big-endian length prefix) and echoes each one back with the same framing --
+// a stand-in for a real DNS-over-TCP responder.
+func startDNSOverTCPEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("dns-over-tcp listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				for {
+					var prefix [2]byte
+					if _, err := io.ReadFull(c, prefix[:]); err != nil {
+						return
+					}
+					msg := make([]byte, binary.BigEndian.Uint16(prefix[:]))
+					if _, err := io.ReadFull(c, msg); err != nil {
+						return
+					}
+					if _, err := c.Write(prefix[:]); err != nil {
+						return
+					}
+					if _, err := c.Write(msg); err != nil {
+						return
+					}
+				}
+			}()
 		}
 	}()
 	return ln.Addr().String()
@@ -327,5 +378,52 @@ func TestNetstackUDPForward_SharesOneCarrierAcrossFlows(t *testing.T) {
 	dialer.mu.Unlock()
 	if got != 1 {
 		t.Fatalf("DialUDPCarrier called %d times across 2 flows, want exactly 1 (flows must share one carrier)", got)
+	}
+}
+
+// TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable guards against the
+// exact regression reported in production: transport=tcp (or any build/config
+// without QUIC) leaves ensureUDPCarrier permanently failing, and every DNS
+// query silently timed out (ERR_NAME_NOT_RESOLVED) even though ordinary TCP
+// CONNECT flows worked fine. A destination-port-53 UDP flow must now be
+// answered via relayDNSOverTCP over the (working) TCP carrier instead of being
+// dropped.
+func TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable(t *testing.T) {
+	fd := &fakeTCPDialer{target: startDNSOverTCPEcho(t)}
+	ns, err := New(fd, failingUDPDialer{})
+	if err != nil {
+		t.Fatalf("new stack: %v", err)
+	}
+	defer ns.Close()
+	ns.addClientAddr(t, [4]byte{10, 0, 0, 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go ns.loopback(ctx)
+
+	laddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 1})}
+	raddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 53}), Port: 53}
+	conn, err := gonet.DialUDP(ns.stack, &laddr, &raddr, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatalf("dial udp through netstack: %v", err)
+	}
+	defer conn.Close()
+
+	query := []byte("fake-dns-query")
+	if _, err := conn.Write(query); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, 1500)
+	n, err := conn.Read(got)
+	if err != nil {
+		t.Fatalf("read dns-over-tcp answer: %v", err)
+	}
+	if !bytes.Equal(got[:n], query) {
+		t.Fatalf("answer = %q, want %q (echoed query)", got[:n], query)
+	}
+
+	if host, port := fd.seen(); host != "10.0.0.53" || port != 53 {
+		t.Fatalf("tcp fallback dialed %s:%d, want 10.0.0.53:53", host, port)
 	}
 }

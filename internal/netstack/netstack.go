@@ -21,10 +21,12 @@ package netstack
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -48,6 +50,9 @@ const (
 	tcpMaxInFlight = 1024
 	udpReadBuf    = 64 * 1024
 	udpFlowQueue  = 64 // per-flow inbound buffer once demuxed off the shared carrier
+
+	dnsPort           = 53
+	dnsOverTCPTimeout = 5 * time.Second
 )
 
 // TCPDialer bridges a TCP flow's original destination to a carrier stream.
@@ -277,6 +282,16 @@ func (s *Stack) relayUDP(local *gonet.UDPConn, host string, port uint16) {
 
 	uc, err := s.ensureUDPCarrier()
 	if err != nil {
+		// No UDP/QUIC carrier available (e.g. transport is "tcp", or the
+		// server is unreachable over QUIC). Datagrams in general have no
+		// TCP equivalent, but DNS -- overwhelmingly the dominant UDP flow a
+		// resolver opens -- has a standard TCP framing (RFC 1035 §4.2.2), so
+		// answer just that case over the carrier's already-working TCP
+		// CONNECT path instead of silently dropping every lookup.
+		if port == dnsPort {
+			s.relayDNSOverTCP(local, host)
+			return
+		}
 		slog.Debug("netstack udp: carrier dial failed", "err", err)
 		return
 	}
@@ -323,6 +338,59 @@ func (s *Stack) relayUDP(local *gonet.UDPConn, host string, port uint16) {
 			}
 		}
 	}
+}
+
+// relayDNSOverTCP answers DNS queries on one UDP flow by round-tripping each
+// query over the carrier's TCP CONNECT path (see relayUDP's fallback comment).
+// Every datagram the resolver sends is one complete DNS message, so each is
+// answered independently over its own short-lived carrier stream.
+func (s *Stack) relayDNSOverTCP(local *gonet.UDPConn, host string) {
+	buf := make([]byte, udpReadBuf)
+	for {
+		n, err := local.Read(buf)
+		if err != nil {
+			return
+		}
+		query := append([]byte(nil), buf[:n]...)
+		resp, err := s.dnsQueryOverTCP(host, query)
+		if err != nil {
+			slog.Debug("netstack udp: dns-over-tcp fallback failed", "target", host, "err", err)
+			continue
+		}
+		if _, err := local.Write(resp); err != nil {
+			return
+		}
+	}
+}
+
+// dnsQueryOverTCP sends one DNS message to host:53 through the carrier's TCP
+// CONNECT path and returns the answer, using the RFC 1035 §4.2.2 TCP framing
+// (a 2-byte big-endian length prefix before the message on both directions).
+func (s *Stack) dnsQueryOverTCP(host string, query []byte) ([]byte, error) {
+	conn, err := s.tcp.DialConnect(host, dnsPort)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(dnsOverTCPTimeout))
+
+	var prefix [2]byte
+	binary.BigEndian.PutUint16(prefix[:], uint16(len(query)))
+	if _, err := conn.Write(prefix[:]); err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(query); err != nil {
+		return nil, err
+	}
+
+	if _, err := io.ReadFull(conn, prefix[:]); err != nil {
+		return nil, err
+	}
+	resp := make([]byte, binary.BigEndian.Uint16(prefix[:]))
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // relay copies bidirectionally between a and b, closing both when either side ends.
