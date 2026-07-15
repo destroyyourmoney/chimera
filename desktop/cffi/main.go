@@ -175,6 +175,17 @@ func ChimeraDeployServer(specJSON *C.char) *C.char {
 	return cString(string(b))
 }
 
+//export ChimeraTeardownServer
+func ChimeraTeardownServer(specJSON *C.char) *C.char {
+	result, err := mobile.TeardownServer(C.GoString(specJSON))
+	env := deployEnvelope{Result: result}
+	if err != nil {
+		env.Error = err.Error()
+	}
+	b, _ := json.Marshal(env) // deployEnvelope always marshals cleanly
+	return cString(string(b))
+}
+
 //export ChimeraFreeHandle
 func ChimeraFreeHandle(handle C.longlong) {
 	h := cgo.Handle(handle)

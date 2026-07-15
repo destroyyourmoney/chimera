@@ -27,6 +27,13 @@ type procRunner struct {
 	mu   sync.Mutex
 	cmd  *exec.Cmd
 	done chan struct{} // closed once cmd.Wait() returns; guards against double-Wait
+
+	// lastServer is req.Server from the most recent Start, kept around so
+	// Stop's -setup-restore call below can pass -server too. Without it,
+	// RestorePowerShell's Config.Endpoints is empty and the endpoint /32
+	// route pins added at connect time (internal/winnet/plan.go's
+	// PowerShell, endpointRoutes loop) are never cleaned up on disconnect.
+	lastServer string
 }
 
 // chimeraExePath resolves chimera.exe as a sibling of the running
@@ -48,6 +55,7 @@ func (r *procRunner) Start(req nethelper.Request) error {
 	// request: stop the old tunnel first rather than leaving two fighting
 	// over the same TUN device name.
 	r.stopLocked()
+	r.lastServer = req.Server
 
 	exe, err := chimeraExePath()
 	if err != nil {
@@ -162,7 +170,14 @@ func (r *procRunner) Stop() error {
 		slog.Warn("chimera-helper: restore skipped, could not resolve chimera.exe", "err", err)
 		return nil
 	}
-	out, err := exec.Command(exe, "tun", "-setup-restore").CombinedOutput()
+	restoreArgs := []string{"tun", "-setup-restore"}
+	if r.lastServer != "" {
+		// Without -server, tunCmd's setupBase.Endpoints is empty and
+		// RestorePowerShell never removes the endpoint /32 route pins added
+		// at connect time -- see the lastServer field doc comment.
+		restoreArgs = append(restoreArgs, "-server", r.lastServer)
+	}
+	out, err := exec.Command(exe, restoreArgs...).CombinedOutput()
 	if err != nil {
 		slog.Warn("chimera-helper: restore reported an error (often harmless, e.g. nothing to restore)", "err", err, "output", string(out))
 	}

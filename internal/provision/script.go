@@ -40,7 +40,23 @@ func buildDeployScript(spec DeploySpec, shortIDs []string) (string, error) {
 	// legible daemon error. ss ships with iproute2, which is present on
 	// every stock Ubuntu/Debian image; skip the check silently if it isn't
 	// (the docker run step below still catches it, just later).
-	b.WriteString("if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE \":" + port + "$\"; then ")
+	//
+	// If the port turns out to be held by a container THIS deploy tooling
+	// created before (identified by the chimeraLabel below, not by name --
+	// spec.Container may have been customized across deploys), remove that
+	// stale container and continue rather than failing: a redeploy to a host
+	// whose previous CHIMERA container is still bound to the port is the
+	// common case (e.g. after this same port-check bug used to reject it
+	// outright), not a real conflict. A port held by anything else -- an
+	// unrelated service, or a container without our label -- still fails
+	// with the clear error below instead of being clobbered.
+	b.WriteString("PORT_BUSY=0\n")
+	b.WriteString("if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE \":" + port + "$\"; then PORT_BUSY=1; fi\n")
+	b.WriteString("if [ \"$PORT_BUSY\" = 1 ] && command -v docker >/dev/null 2>&1; then\n")
+	b.WriteString("  STALE=$(docker ps -q --filter " + q("label="+chimeraLabel) + " --filter " + q("publish="+port) + " 2>/dev/null | head -n1)\n")
+	b.WriteString("  if [ -n \"$STALE\" ]; then docker rm -f \"$STALE\" >/dev/null 2>&1 || true; PORT_BUSY=0; fi\n")
+	b.WriteString("fi\n")
+	b.WriteString("if [ \"$PORT_BUSY\" = 1 ]; then ")
 	b.WriteString("echo \"" + portInUseMarker + ": port " + port + " is already in use on this server\" >&2; exit 1; fi\n")
 
 	// 1. Ensure git + docker are present.
@@ -68,7 +84,7 @@ func buildDeployScript(spec DeploySpec, shortIDs []string) (string, error) {
 
 	// 5. (Re)launch the server container.
 	b.WriteString("docker rm -f " + q(spec.Container) + " >/dev/null 2>&1 || true\n")
-	b.WriteString("docker run -d --name " + q(spec.Container) + " --restart unless-stopped ")
+	b.WriteString("docker run -d --name " + q(spec.Container) + " --label " + q(chimeraLabel) + " --restart unless-stopped ")
 	b.WriteString("-p " + port + ":" + port + "/tcp -p " + port + ":" + port + "/udp ")
 	b.WriteString(q(spec.Image) + " server -listen :" + port +
 		" -steal-host " + q(spec.StealHost) + " -priv \"$PRIV\" -sid " + q(sids) + "\n")

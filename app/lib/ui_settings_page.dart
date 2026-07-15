@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'theme.dart';
 
-class UiSettingsPage extends StatelessWidget {
+class UiSettingsPage extends StatefulWidget {
   const UiSettingsPage({
     super.key,
     required this.autostart,
@@ -15,6 +15,29 @@ class UiSettingsPage extends StatelessWidget {
   final bool autostart;
   final bool busy;
   final ValueChanged<bool> onToggleAutostart;
+
+  @override
+  State<UiSettingsPage> createState() => _UiSettingsPageState();
+}
+
+class _UiSettingsPageState extends State<UiSettingsPage> {
+  // Mirrors widget.autostart locally: this page is pushed as its own route,
+  // so HomePage's setState() after the value actually changes can't reach an
+  // already-built UiSettingsPage (see VpnSettingsPage's _mode for the same
+  // issue/fix). Optimistic -- launch_at_startup enable/disable is treated as
+  // best-effort everywhere else in this app too.
+  late bool _autostart;
+
+  @override
+  void initState() {
+    super.initState();
+    _autostart = widget.autostart;
+  }
+
+  void _toggle(bool v) {
+    setState(() => _autostart = v);
+    widget.onToggleAutostart(v);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,8 +80,8 @@ class UiSettingsPage extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
                 Switch(
-                  value: autostart,
-                  onChanged: busy ? null : onToggleAutostart,
+                  value: _autostart,
+                  onChanged: widget.busy ? null : _toggle,
                 ),
               ],
             ),

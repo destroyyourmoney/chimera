@@ -38,3 +38,5 @@ app/windows/wintun.dll
 Thumbs.db
 .vscode/
 .idea/
+
+dist/

@@ -119,3 +119,55 @@ func DeployServerJSON(specJSON string) (string, error) {
 	}
 	return string(b), nil
 }
+
+// TeardownSpecJSON is the wire shape ChimeraTeardownServer takes: just enough
+// SSH login to reach the VPS -- mirrors DeploySpecJSON's SSH fields (see its
+// doc comment on why only password auth is exposed for now).
+type TeardownSpecJSON struct {
+	Host        string `json:"host"`
+	SSHPort     int    `json:"sshPort"`
+	SSHUser     string `json:"sshUser"`
+	SSHPassword string `json:"sshPassword"`
+}
+
+// TeardownServerJSON dials the given host over SSH and removes any
+// CHIMERA-managed Docker container(s) there (see provision.SSHDeployer.Teardown),
+// so deleting a server from the app doesn't leave it running (and billing)
+// on the VPS forever. Returns "" on success; callers should treat this as
+// best-effort -- an error here (unreachable host, bad credentials, VPS
+// already gone) shouldn't block removing the server from the local list.
+func TeardownServerJSON(specJSON string) (string, error) {
+	var spec TeardownSpecJSON
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return "", fmt.Errorf("api: invalid teardown spec: %w", err)
+	}
+	if spec.Host == "" {
+		return "", fmt.Errorf("api: teardown spec: host is required")
+	}
+	if spec.SSHUser == "" {
+		return "", fmt.Errorf("api: teardown spec: sshUser is required")
+	}
+	sshPort := spec.SSHPort
+	if sshPort == 0 {
+		sshPort = 22
+	}
+
+	// Trust-on-first-connect, same rationale as DeployServerJSON: there's no
+	// persisted known_hosts store for a call originating fresh from the UI
+	// each time.
+	runner, err := provision.NewSSHRunner(
+		fmt.Sprintf("%s:%d", spec.Host, sshPort),
+		spec.SSHUser,
+		[]ssh.AuthMethod{ssh.Password(spec.SSHPassword)},
+		ssh.HostKeyCallback(func(_ string, _ net.Addr, _ ssh.PublicKey) error { return nil }),
+	)
+	if err != nil {
+		return "", err
+	}
+
+	deployer := &provision.SSHDeployer{Runner: runner}
+	if err := deployer.Teardown(context.Background()); err != nil {
+		return "", err
+	}
+	return "", nil
+}

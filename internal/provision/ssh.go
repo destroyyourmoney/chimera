@@ -46,6 +46,14 @@ const (
 	serverBuildTags     = "chimera_utls chimera_quic"
 	remoteDir           = "/opt/chimera"
 	dockerfilePath      = "docker/Dockerfile"
+
+	// chimeraLabel is applied to every container this package's deploy
+	// script creates (see script.go's docker run), so a later port-conflict
+	// self-heal or a Teardown call can identify "a container this tooling
+	// created" without relying on the container name alone (spec.Container
+	// can be customized) or risking removing an operator's unrelated
+	// container that merely happens to occupy the same port/name.
+	chimeraLabel = "io.chimera.managed=true"
 )
 
 // DeploySpec describes a single server deployment requested by the operator.
@@ -217,6 +225,36 @@ func parsePub(out string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("provision: no %q marker in remote output (deploy may have failed)", pubMarker)
+}
+
+// Teardown removes any CHIMERA-managed Docker container(s) (see chimeraLabel)
+// from the host reachable via d.Runner -- the counterpart to Deploy, used
+// when an operator deletes a server from the app so the VPS doesn't keep
+// running (and billing for) an orphaned container indefinitely. Identifying
+// containers by label rather than a fixed/expected name means it works
+// regardless of what Container name the original Deploy used.
+func (d *SSHDeployer) Teardown(ctx context.Context) error {
+	if d.Runner == nil {
+		return fmt.Errorf("provision: nil runner")
+	}
+	if _, err := d.Runner.Run(ctx, teardownScript()); err != nil {
+		return fmt.Errorf("provision: remote teardown failed: %w", err)
+	}
+	return nil
+}
+
+// teardownScript renders the remote script Teardown runs. No operator input
+// is interpolated, so there's no injection surface to guard here the way
+// buildDeployScript does.
+func teardownScript() string {
+	q := func(s string) string { return "'" + s + "'" }
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	b.WriteString("if command -v docker >/dev/null 2>&1; then\n")
+	b.WriteString("  IDS=$(docker ps -aq --filter " + q("label="+chimeraLabel) + " 2>/dev/null)\n")
+	b.WriteString("  if [ -n \"$IDS\" ]; then docker rm -f $IDS >/dev/null 2>&1 || true; fi\n")
+	b.WriteString("fi\n")
+	return b.String()
 }
 
 // splitHostPort splits "host" or "host:port"; falls back to the given default port.

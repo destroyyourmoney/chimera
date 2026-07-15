@@ -134,3 +134,9 @@ func ParseLink(uri string) (string, error) { return api.ParseLinkJSON(uri) }
 // have a chimera:// link yet, I have a fresh server" UI flow. Blocks for the
 // whole deployment; run on a background thread like StartFD/StartSocks.
 func DeployServer(specJSON string) (string, error) { return api.DeployServerJSON(specJSON) }
+
+// TeardownServer removes any CHIMERA-managed Docker container(s) from a VPS
+// over SSH (from a JSON api.TeardownSpecJSON) -- the counterpart to
+// DeployServer, used when the user deletes a server from the app. Blocks for
+// the SSH round-trip; run on a background thread like DeployServer.
+func TeardownServer(specJSON string) (string, error) { return api.TeardownServerJSON(specJSON) }

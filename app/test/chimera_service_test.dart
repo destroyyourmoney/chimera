@@ -56,6 +56,10 @@ class FakeChimeraApi implements ChimeraNativeApi {
       jsonEncode({'result': '{}', 'error': ''});
 
   @override
+  String teardownServer(String specJson) =>
+      jsonEncode({'result': '', 'error': ''});
+
+  @override
   void freeHandle(int handle) {}
 }
 

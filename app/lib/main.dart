@@ -488,12 +488,12 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   /// one elevated UAC prompt per call. There's no "off" tier anymore -- the
   /// app is TUN-only, so this always brings the tunnel up at the chosen
   /// tier, live, independent of whether Connect/Disconnect has been pressed.
-  Future<void> _setNetworkProtection(NetworkProtectionMode mode) async {
+  Future<bool> _setNetworkProtection(NetworkProtectionMode mode) async {
     if (_settings.servers.isEmpty) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Add a server first')));
-      return;
+      return false;
     }
     setState(() => _busy = true);
     try {
@@ -517,6 +517,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           SnackBar(content: Text('Network protection failed: ${result.error}')),
         );
       }
+      return result.ok;
     } finally {
       if (mounted) setState(() => _busy = false);
     }

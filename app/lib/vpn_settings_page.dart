@@ -23,7 +23,7 @@ class VpnSettingsPage extends StatefulWidget {
   final List<String> customDns;
   final bool busy;
   final bool hasServers;
-  final Future<void> Function(NetworkProtectionMode mode) onSetMode;
+  final Future<bool> Function(NetworkProtectionMode mode) onSetMode;
   final Future<void> Function(List<String> dns) onSetCustomDns;
 
   @override
@@ -32,17 +32,35 @@ class VpnSettingsPage extends StatefulWidget {
 
 class _VpnSettingsPageState extends State<VpnSettingsPage> {
   late final TextEditingController _dnsCtrl;
+  // Mirrors widget.mode so a tap updates the radio tiles immediately: this
+  // page is pushed as its own route (Navigator.push), so a setState() up in
+  // HomePage after the mode actually changes can't reach back down into an
+  // already-built VpnSettingsPage -- only popping and re-pushing would pick
+  // up a new widget.mode. Local state makes the tiles reactive on their own.
+  late NetworkProtectionMode _mode;
 
   @override
   void initState() {
     super.initState();
     _dnsCtrl = TextEditingController(text: widget.customDns.join(', '));
+    _mode = widget.mode;
   }
 
   @override
   void dispose() {
     _dnsCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _setMode(NetworkProtectionMode v) async {
+    final prev = _mode;
+    setState(() => _mode = v);
+    // widget.onSetMode (HomePage._setNetworkProtection) actually engages the
+    // tunnel at the new tier and reports whether that succeeded -- revert
+    // the optimistic tile selection if it didn't, so the UI never claims a
+    // mode that isn't actually running.
+    final ok = await widget.onSetMode(v);
+    if (!ok && mounted) setState(() => _mode = prev);
   }
 
   void _submitDns() {
@@ -168,9 +186,9 @@ class _VpnSettingsPageState extends State<VpnSettingsPage> {
     return RadioListTile<NetworkProtectionMode>(
       value: value,
       // ignore: deprecated_member_use
-      groupValue: widget.mode,
+      groupValue: _mode,
       // ignore: deprecated_member_use
-      onChanged: canEdit ? (v) => widget.onSetMode(v!) : null,
+      onChanged: canEdit ? (v) => _setMode(v!) : null,
       contentPadding: EdgeInsets.zero,
       dense: true,
       title: Text(

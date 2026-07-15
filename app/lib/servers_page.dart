@@ -4,8 +4,10 @@
 // endpoints in order/by health, so putting a server first in the assembled
 // subscription is a legitimate way to express preference without new Go
 // plumbing.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +19,16 @@ import 'server_ping.dart';
 import 'server_users_page.dart';
 import 'settings_store.dart';
 import 'theme.dart';
+
+/// _teardownServerInIsolate is a top-level function, not a closure -- same
+/// "unsendable object" reason as server_deploy_page.dart's
+/// _deployServerInIsolate.
+void _teardownServerInIsolate(List<Object> args) {
+  final specJson = args[0] as String;
+  final sendPort = args[1] as SendPort;
+  final bindings = ChimeraBindings.open();
+  sendPort.send(bindings.teardownServer(specJson));
+}
 
 class ServersPage extends StatefulWidget {
   const ServersPage({
@@ -83,7 +95,18 @@ class _ServersPageState extends State<ServersPage> {
     if (result == null) return;
     setState(() {
       widget.servers.add(
-        ServerEntry(id: _newId(), label: result.label, link: result.link),
+        ServerEntry(
+          id: _newId(),
+          label: result.label,
+          link: result.link,
+          // Saves the SSH login this deploy just used, so deleting this
+          // server later can also tear down its Docker container -- see
+          // _teardownRemote and ServerFormResult's doc comment.
+          adminSshHost: result.adminSshHost,
+          adminSshPort: result.adminSshPort ?? 22,
+          adminSshUser: result.adminSshUser,
+          adminSshPassword: result.adminSshPassword,
+        ),
       );
     });
     await widget.onChanged();
@@ -92,6 +115,61 @@ class _ServersPageState extends State<ServersPage> {
   void _remove(ServerEntry e) {
     setState(() => widget.servers.remove(e));
     widget.onChanged();
+    unawaited(_teardownRemote(e));
+  }
+
+  /// Best-effort: removes the Docker container this server's deploy created
+  /// on the VPS, if we have SSH access saved for it (ServerEntry's adminSsh*
+  /// fields -- set by _deployNew/_promptAdminSetup, not always present for a
+  /// server that was only ever pasted/imported as a chimera:// link). No SSH
+  /// login means there's nothing to reach out and clean up, so the server is
+  /// just removed from the local list in that case -- same as before this
+  /// existed. A failure here doesn't undo the local removal; it only warns,
+  /// since the user has already asked for this server to be gone from CHIMERA.
+  Future<void> _teardownRemote(ServerEntry e) async {
+    final host = e.adminSshHost;
+    final user = e.adminSshUser;
+    if (host == null || host.isEmpty || user == null || user.isEmpty) return;
+
+    final spec = jsonEncode({
+      'host': host,
+      'sshPort': e.adminSshPort,
+      'sshUser': user,
+      'sshPassword': e.adminSshPassword ?? '',
+    });
+    try {
+      // Same "background isolate only" contract as _deployServerInIsolate --
+      // teardownServer blocks for the SSH round-trip.
+      final receivePort = ReceivePort();
+      await Isolate.spawn(_teardownServerInIsolate, [
+        spec,
+        receivePort.sendPort,
+      ]);
+      final resultJson = await receivePort.first as String;
+      receivePort.close();
+      final env = jsonDecode(resultJson) as Map<String, dynamic>;
+      final err = env['error'] as String? ?? '';
+      if (err.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Server removed, but its container on the VPS could not be '
+              'torn down: $err',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Server removed, but its container on the VPS could not be '
+            'torn down: $e',
+          ),
+        ),
+      );
+    }
   }
 
   /// Opens (setting up admin credentials first if needed) the "manage users"

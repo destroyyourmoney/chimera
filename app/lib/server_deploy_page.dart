@@ -123,9 +123,16 @@ class _ServerDeployPageState extends State<ServerDeployPage> {
       final label = _labelCtrl.text.trim().isNotEmpty
           ? _labelCtrl.text.trim()
           : _hostCtrl.text.trim();
-      Navigator.of(
-        context,
-      ).pop(ServerFormResult(label: label, link: links.first));
+      Navigator.of(context).pop(
+        ServerFormResult(
+          label: label,
+          link: links.first,
+          adminSshHost: _hostCtrl.text.trim(),
+          adminSshPort: int.tryParse(_sshPortCtrl.text.trim()) ?? 22,
+          adminSshUser: _sshUserCtrl.text.trim(),
+          adminSshPassword: _sshPasswordCtrl.text,
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {

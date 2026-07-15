@@ -8,7 +8,7 @@ import 'package:flutter/material.dart';
 
 import 'theme.dart';
 
-class AntiCensorshipPage extends StatelessWidget {
+class AntiCensorshipPage extends StatefulWidget {
   const AntiCensorshipPage({
     super.key,
     required this.transport,
@@ -19,6 +19,26 @@ class AntiCensorshipPage extends StatelessWidget {
   final String transport;
   final bool busy;
   final Future<void> Function(String transport) onSetTransport;
+
+  @override
+  State<AntiCensorshipPage> createState() => _AntiCensorshipPageState();
+}
+
+class _AntiCensorshipPageState extends State<AntiCensorshipPage> {
+  // Mirrors widget.transport locally -- see VpnSettingsPage's _mode doc
+  // comment for why a pushed route needs its own copy to be reactive.
+  late String _transport;
+
+  @override
+  void initState() {
+    super.initState();
+    _transport = widget.transport;
+  }
+
+  void _setTransport(String v) {
+    setState(() => _transport = v);
+    widget.onSetTransport(v);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,9 +103,9 @@ class AntiCensorshipPage extends StatelessWidget {
     return RadioListTile<String>(
       value: value,
       // ignore: deprecated_member_use
-      groupValue: transport,
+      groupValue: _transport,
       // ignore: deprecated_member_use
-      onChanged: busy ? null : (v) => onSetTransport(v!),
+      onChanged: widget.busy ? null : (v) => _setTransport(v!),
       contentPadding: EdgeInsets.zero,
       dense: true,
       title: Text(

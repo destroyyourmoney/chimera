@@ -27,9 +27,28 @@ const kFingerprints = [
 const kTransportModes = ['auto', 'quic', 'tcp'];
 
 class ServerFormResult {
-  ServerFormResult({required this.label, required this.link});
+  ServerFormResult({
+    required this.label,
+    required this.link,
+    this.adminSshHost,
+    this.adminSshPort,
+    this.adminSshUser,
+    this.adminSshPassword,
+  });
   final String label;
   final String link;
+
+  /// Set only by ServerDeployPage (the "install onto a bare VPS" flow),
+  /// which already collects an SSH login to provision the server -- carrying
+  /// it through here lets ServersPage save it onto the new ServerEntry so
+  /// deleting the server later can also tear its Docker container down
+  /// without asking for SSH credentials a second time. Null for servers
+  /// added via a pasted/imported chimera:// link, which never had an SSH
+  /// login to begin with.
+  final String? adminSshHost;
+  final int? adminSshPort;
+  final String? adminSshUser;
+  final String? adminSshPassword;
 }
 
 class ServerFormPage extends StatefulWidget {

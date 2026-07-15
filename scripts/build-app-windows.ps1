@@ -2,6 +2,8 @@ param(
     [string]$Go = "C:\Program Files\Go\bin\go.exe",
     [string]$Gcc,
     [string]$Flutter,
+    [string]$Iscc,
+    [switch]$SkipInstaller,
     [string]$Tags = "chimera_utls chimera_quic chimera_netstack"
 )
 
@@ -97,6 +99,59 @@ Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item (Join-Path $release "*") $dist -Recurse -Force
 
+# Flutter's Windows engine (flutter_windows.dll, chimera_tray.exe itself) is
+# built against MSVC and dynamically links the VC++ runtime (MSVCP140.dll,
+# VCRUNTIME140.dll, ...). That runtime isn't part of a stock Windows image, so
+# a clean/fresh machine fails to launch chimera_tray.exe with "The code
+# execution cannot proceed because MSVCP140.dll was not found." Bundle the
+# redistributable installer alongside the app so deploying to a clean machine
+# is just "run vc_redist.x64.exe once, then chimera_tray.exe".
+$vcRedist = Join-Path $dist "vc_redist.x64.exe"
+Write-Host "==> Fetching VC++ Redistributable (needed on clean target machines)" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcRedist -UseBasicParsing
+} catch {
+    Write-Warning "Could not download vc_redist.x64.exe ($($_.Exception.Message)) -- clean target machines will need it installed manually from https://aka.ms/vs/17/release/vc_redist.x64.exe"
+}
+
 Remove-Item -Recurse -Force $env:GOCACHE, $env:GOPATH, $env:GOMODCACHE -ErrorAction SilentlyContinue
 
 Write-Host "OK: $dist\chimera_tray.exe (run it from inside that folder -- it needs the DLLs/data next to it)" -ForegroundColor Green
+if (Test-Path $vcRedist) {
+    Write-Host "    On a clean/fresh machine, run $dist\vc_redist.x64.exe once first (installs MSVCP140.dll etc.)." -ForegroundColor Yellow
+}
+
+# Build the single-.exe installer (scripts/windows-installer.iss) with Inno
+# Setup, if available. It bundles the vc_redist prerequisite, copies the app
+# to Program Files, and runs `chimera-helper.exe install` to register the
+# Windows service -- so running the installer is the only manual step a
+# clean machine needs, in place of the folder-copy + vc_redist +
+# chimera-helper.exe install dance.
+if ($SkipInstaller) {
+    Write-Host "==> Skipping installer build (-SkipInstaller)" -ForegroundColor Yellow
+} else {
+    if (-not $Iscc) {
+        $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $Iscc = $cmd.Source
+        } else {
+            # winget's per-user install (JRSoftware.InnoSetup) lands under
+            # %LOCALAPPDATA%\Programs, not Program Files -- check both.
+            foreach ($candidate in @(
+                "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+            )) {
+                if (Test-Path $candidate) { $Iscc = $candidate; break }
+            }
+        }
+    }
+    if (-not $Iscc -or -not (Test-Path $Iscc)) {
+        Write-Warning "Inno Setup (ISCC.exe) not found -- skipping installer build. Install it (winget install --id JRSoftware.InnoSetup -e) or pass -Iscc 'C:\path\to\ISCC.exe', then re-run, or compile scripts\windows-installer.iss by hand."
+    } else {
+        Write-Host "==> Building chimera_setup.exe installer" -ForegroundColor Cyan
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "dist") | Out-Null
+        & $Iscc (Join-Path $repo "scripts\windows-installer.iss")
+        if ($LASTEXITCODE -ne 0) { throw "ISCC.exe failed with exit code $LASTEXITCODE" }
+        Write-Host "OK: dist\chimera_setup.exe (run this on a clean machine -- installs the app, VC++ runtime, and the ChimeraNetHelper service)" -ForegroundColor Green
+    }
+}

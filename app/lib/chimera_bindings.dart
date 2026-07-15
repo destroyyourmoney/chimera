@@ -48,6 +48,9 @@ typedef _ParseLinkDart = Pointer<Utf8> Function(Pointer<Utf8> uri);
 typedef _DeployServerNative = Pointer<Utf8> Function(Pointer<Utf8> specJson);
 typedef _DeployServerDart = Pointer<Utf8> Function(Pointer<Utf8> specJson);
 
+typedef _TeardownServerNative = Pointer<Utf8> Function(Pointer<Utf8> specJson);
+typedef _TeardownServerDart = Pointer<Utf8> Function(Pointer<Utf8> specJson);
+
 typedef _FreeHandleNative = Void Function(Int64 handle);
 typedef _FreeHandleDart = void Function(int handle);
 
@@ -73,6 +76,12 @@ abstract class ChimeraNativeApi {
   /// deployment (installing Docker + building an image can take minutes) --
   /// callers MUST invoke this on a background isolate, never the UI isolate.
   String deployServer(String specJson);
+
+  /// teardownServer removes any CHIMERA-managed Docker container(s) from a
+  /// VPS over SSH (see ChimeraTeardownServer in desktop/cffi/main.go) -- the
+  /// counterpart to deployServer, called when a server is deleted from the
+  /// app. Same "background isolate only" contract as deployServer.
+  String teardownServer(String specJson);
   void freeHandle(int handle);
 }
 
@@ -110,6 +119,10 @@ class ChimeraBindings implements ChimeraNativeApi {
           .lookupFunction<_DeployServerNative, _DeployServerDart>(
             'ChimeraDeployServer',
           ),
+      _teardownServerNative = lib
+          .lookupFunction<_TeardownServerNative, _TeardownServerDart>(
+            'ChimeraTeardownServer',
+          ),
       _freeHandleNative = lib
           .lookupFunction<_FreeHandleNative, _FreeHandleDart>(
             'ChimeraFreeHandle',
@@ -128,6 +141,7 @@ class ChimeraBindings implements ChimeraNativeApi {
   final _StateJSONDart _stateJSONNative;
   final _ParseLinkDart _parseLinkNative;
   final _DeployServerDart _deployServerNative;
+  final _TeardownServerDart _teardownServerNative;
   final _FreeHandleDart _freeHandleNative;
   final _FreeStringDart _freeStringNative;
 
@@ -219,6 +233,16 @@ class ChimeraBindings implements ChimeraNativeApi {
     final specPtr = specJson.toNativeUtf8();
     try {
       return _takeString(_deployServerNative(specPtr));
+    } finally {
+      calloc.free(specPtr);
+    }
+  }
+
+  @override
+  String teardownServer(String specJson) {
+    final specPtr = specJson.toNativeUtf8();
+    try {
+      return _takeString(_teardownServerNative(specPtr));
     } finally {
       calloc.free(specPtr);
     }

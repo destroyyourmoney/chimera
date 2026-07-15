@@ -35,7 +35,7 @@ class SettingsHubPage extends StatelessWidget {
   final bool isConnected;
   final Future<void> Function() onPersist;
   final ValueChanged<bool> onToggleAutostart;
-  final Future<void> Function(NetworkProtectionMode mode) onSetNetworkProtection;
+  final Future<bool> Function(NetworkProtectionMode mode) onSetNetworkProtection;
   final Future<void> Function(List<String> dns) onSetCustomDns;
   final Future<void> Function(String transport) onSetTransport;
   final String Function() buildDiagnosticsReport;

@@ -121,3 +121,48 @@ func TestNewSSHRunner_RequiresHostKey(t *testing.T) {
 		t.Fatal("expected error when host-key callback is nil")
 	}
 }
+
+func TestDeploy_LabelsContainerAndSelfHealsPortConflict(t *testing.T) {
+	fr := &fakeRunner{out: "CHIMERA_PUB=pub\n"}
+	d := &SSHDeployer{Runner: fr}
+	if _, err := d.Deploy(context.Background(), DeploySpec{Host: "1.2.3.4"}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	s := fr.gotScript
+	if !strings.Contains(s, "--label 'io.chimera.managed=true'") {
+		t.Fatalf("script does not label the container:\n%s", s)
+	}
+	// The port pre-check must attempt a label+publish-scoped self-heal
+	// before giving up with portInUseMarker -- see script.go's step 0 doc
+	// comment on why (redeploying to a host whose own prior CHIMERA
+	// container still holds the port must not be treated as a conflict).
+	if !strings.Contains(s, "label=io.chimera.managed=true") ||
+		!strings.Contains(s, "publish=443") {
+		t.Fatalf("script does not self-heal a stale CHIMERA container on the port:\n%s", s)
+	}
+	if !strings.Contains(s, portInUseMarker) {
+		t.Fatalf("script dropped the port-in-use error path entirely:\n%s", s)
+	}
+}
+
+func TestTeardown_RemovesLabeledContainers(t *testing.T) {
+	fr := &fakeRunner{}
+	d := &SSHDeployer{Runner: fr}
+	if err := d.Teardown(context.Background()); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	s := fr.gotScript
+	if !strings.Contains(s, "label=io.chimera.managed=true") {
+		t.Fatalf("teardown script does not filter by the CHIMERA label:\n%s", s)
+	}
+	if !strings.Contains(s, "docker rm -f $IDS") {
+		t.Fatalf("teardown script does not remove the matched containers:\n%s", s)
+	}
+}
+
+func TestTeardown_NilRunnerErrors(t *testing.T) {
+	d := &SSHDeployer{}
+	if err := d.Teardown(context.Background()); err == nil {
+		t.Fatal("expected error with a nil Runner")
+	}
+}

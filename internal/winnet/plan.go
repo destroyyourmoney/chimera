@@ -98,6 +98,27 @@ func PowerShell(c Config) (string, error) {
 	b.WriteString("$ErrorActionPreference = 'Stop'\n")
 	b.WriteString("$ifAlias = " + psQuote(c.InterfaceAlias) + "\n")
 	b.WriteString("$endpointNames = @(" + psArray(c.Endpoints) + ")\n")
+	// $fwGroup must be defined unconditionally (not just when c.Firewall is
+	// set): the killswitch block below also references it, and with
+	// $ErrorActionPreference='Stop' a reference to an undefined variable used
+	// as -Group $null on New-NetFirewallRule throws mid-script, aborting
+	// before Set-NetFirewallProfile -DefaultOutboundAction Block's allow-list
+	// rules get created -- or, worse, aborting a later Restore run before it
+	// resets DefaultOutboundAction back to NotConfigured, leaving all
+	// outbound traffic blocked even after Disconnect.
+	b.WriteString("$fwGroup = " + psQuote(FirewallGroup) + "\n")
+	// Clear any /1 split-default routes left over from a previous session
+	// (chimera-helper always passes -setup-keep, so a crashed/killed tunnel
+	// leaves these in place) BEFORE resolving endpoint routes below. Doing
+	// this after the Find-NetRoute capture instead is the bug that caused a
+	// self-referencing route: with the stale /1s still active, Find-NetRoute
+	// resolves the VPN server's own IP through the TUN device (NextHop
+	// 0.0.0.0) rather than the physical gateway, so the "original route"
+	// pinned back for the server points right back into the tunnel --
+	// packets to the server go out, but nothing can route back in (matches
+	// "upload nonzero, download stuck at zero").
+	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
+	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
 	b.WriteString("$endpointRoutes = @()\n")
 	b.WriteString("foreach ($name in $endpointNames) {\n")
 	b.WriteString("  $ips = @()\n")
@@ -115,7 +136,6 @@ func PowerShell(c Config) (string, error) {
 	b.WriteString("}\n")
 	b.WriteString("$if = Get-NetAdapter -InterfaceAlias $ifAlias -ErrorAction Stop\n")
 	if c.Firewall {
-		b.WriteString("$fwGroup = " + psQuote(FirewallGroup) + "\n")
 		b.WriteString("$nonTunAliases = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -ne $ifAlias -and $_.Status -ne 'Disabled' } | ForEach-Object { $_.InterfaceAlias })\n")
 	}
 	b.WriteString("Get-NetIPAddress -InterfaceAlias $ifAlias -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue\n")
@@ -123,17 +143,12 @@ func PowerShell(c Config) (string, error) {
 	if len(c.DNS) > 0 {
 		b.WriteString("Set-DnsClientServerAddress -InterfaceAlias $ifAlias -ServerAddresses @(" + psArray(c.DNS) + ")\n")
 	}
-	// Route setup after a previous session's leftover routes (chimera-helper
-	// always passes -setup-keep, i.e. fail-closed: routes are deliberately
-	// NOT restored if the tunnel dies unexpectedly) must be idempotent --
-	// every New-NetRoute below tolerates "already exists" (Windows error 87)
-	// with -ErrorAction SilentlyContinue, same as the Remove-NetRoute calls
-	// already do, instead of letting $ErrorActionPreference='Stop' kill the
-	// whole plan (and with it the just-started chimera.exe tun process) a
-	// few seconds after every reconnect that finds its own prior routes
-	// still in place.
-	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
+	// The stale /1 routes were already removed above (before the endpoint
+	// capture loop); re-adding them here just needs to tolerate "already
+	// exists" (Windows error 87) with -ErrorAction SilentlyContinue instead
+	// of letting $ErrorActionPreference='Stop' kill the whole plan (and with
+	// it the just-started chimera.exe tun process) if anything re-creates
+	// them concurrently.
 	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
 	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
 	b.WriteString("foreach ($r in $endpointRoutes) {\n")
@@ -177,22 +192,35 @@ func RestorePowerShell(c Config) (string, error) {
 	b.WriteString("$ifAlias = " + psQuote(c.InterfaceAlias) + "\n")
 	b.WriteString("$endpointNames = @(" + psArray(c.Endpoints) + ")\n")
 	b.WriteString("$fwGroup = " + psQuote(FirewallGroup) + "\n")
-	b.WriteString("$if = Get-NetAdapter -InterfaceAlias $ifAlias -ErrorAction Stop\n")
+	// Restore is the recovery path and must claw back everything it can even
+	// if the TUN adapter itself is already gone (device removed, driver
+	// reset, etc.) -- previously Get-NetAdapter with -ErrorAction Stop ran
+	// first, so throwing here (which it does whenever the adapter is
+	// missing) skipped every step below it: the firewall leak-guard rules,
+	// the killswitch's DefaultOutboundAction reset, and the endpoint /32 pin
+	// cleanup all silently never ran, leaving the machine's egress blocked
+	// or routed through pins that no longer resolve anywhere. Everything
+	// that doesn't require the adapter to exist now runs unconditionally
+	// first; only the interface-scoped route/IP/DNS cleanup is skipped if
+	// the adapter is truly gone (nothing to clean up there in that case).
 	b.WriteString("Get-NetFirewallRule -Group $fwGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n")
 	// Always clear a killswitch default-outbound override on restore, even if
 	// this particular Config didn't request one -- restore is the recovery
 	// path and must never leave the machine's egress blocked by accident.
 	b.WriteString("Set-NetFirewallProfile -All -DefaultOutboundAction NotConfigured\n")
-	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("Get-NetIPAddress -InterfaceAlias $ifAlias -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue\n")
-	b.WriteString("Set-DnsClientServerAddress -InterfaceAlias $ifAlias -ResetServerAddresses\n")
 	b.WriteString("foreach ($name in $endpointNames) {\n")
 	b.WriteString("  $ips = @()\n")
 	b.WriteString("  $parsed = [System.Net.IPAddress]::None\n")
 	b.WriteString("  if ([System.Net.IPAddress]::TryParse($name, [ref]$parsed) -and $parsed.AddressFamily -eq 'InterNetwork') { $ips += $parsed.IPAddressToString }\n")
 	b.WriteString("  else { $ips += [System.Net.Dns]::GetHostAddresses($name) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString } }\n")
 	b.WriteString("  foreach ($ip in $ips) { Get-NetRoute -DestinationPrefix \"$ip/32\" -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue }\n")
+	b.WriteString("}\n")
+	b.WriteString("$if = Get-NetAdapter -InterfaceAlias $ifAlias -ErrorAction SilentlyContinue\n")
+	b.WriteString("if ($null -ne $if) {\n")
+	b.WriteString("  Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
+	b.WriteString("  Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
+	b.WriteString("  Get-NetIPAddress -InterfaceAlias $ifAlias -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue\n")
+	b.WriteString("  Set-DnsClientServerAddress -InterfaceAlias $ifAlias -ResetServerAddresses -ErrorAction SilentlyContinue\n")
 	b.WriteString("}\n")
 	return b.String(), nil
 }
