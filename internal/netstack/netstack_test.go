@@ -112,6 +112,20 @@ func (failingUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
 	return nil, errors.New("no udp carrier")
 }
 
+// slowUDPDialer blocks until release is closed before returning -- models a
+// real QUIC dial against a network that silently drops UDP (the network's
+// NAT/firewall never delivers a response), which fails via quic-go's own
+// handshake/idle timeout on the order of many seconds, not immediately like
+// failingUDPDialer above. This is the case ensureUDPCarrier's fast-fail path
+// (udpCarrierDialTimeout) exists for: real DNS resolvers give up in a few
+// seconds and must not wait on this.
+type slowUDPDialer struct{ release chan struct{} }
+
+func (d *slowUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
+	<-d.release
+	return nil, errors.New("slow udp dial: network never answered")
+}
+
 // --- helpers ---
 
 func startTCPEcho(t *testing.T) string {
@@ -426,4 +440,75 @@ func TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable(t *testing.T) {
 	if host, port := fd.seen(); host != "10.0.0.53" || port != 53 {
 		t.Fatalf("tcp fallback dialed %s:%d, want 10.0.0.53:53", host, port)
 	}
+}
+
+// TestNetstackDNSFallsBackFastWhenUDPCarrierDialIsSlow guards against the
+// production regression the failing-dialer test above doesn't catch: a real
+// QUIC dial against a network that silently drops UDP doesn't fail
+// instantly, it hangs until quic-go's own handshake/idle timeout -- many
+// seconds, far past what any real DNS resolver waits (nslookup: 2s per try).
+// ensureUDPCarrier must give up on a hung dial within udpCarrierDialTimeout
+// so relayDNSOverTCP gets a chance to answer before the resolver does, and a
+// second query arriving during the retry backoff must not wait on another
+// slow dial either.
+func TestNetstackDNSFallsBackFastWhenUDPCarrierDialIsSlow(t *testing.T) {
+	dialer := &slowUDPDialer{release: make(chan struct{})}
+	defer close(dialer.release) // let the background dial finish, don't leak it past the test
+
+	fd := &fakeTCPDialer{target: startDNSOverTCPEcho(t)}
+	ns, err := New(fd, dialer)
+	if err != nil {
+		t.Fatalf("new stack: %v", err)
+	}
+	defer ns.Close()
+	ns.addClientAddr(t, [4]byte{10, 0, 0, 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go ns.loopback(ctx)
+
+	laddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 1})}
+	dial := func() *gonet.UDPConn {
+		t.Helper()
+		raddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 53}), Port: 53}
+		conn, err := gonet.DialUDP(ns.stack, &laddr, &raddr, ipv4.ProtocolNumber)
+		if err != nil {
+			t.Fatalf("dial udp through netstack: %v", err)
+		}
+		return conn
+	}
+	query := func(conn *gonet.UDPConn, msg string, budget time.Duration) {
+		t.Helper()
+		start := time.Now()
+		if _, err := conn.Write([]byte(msg)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(budget))
+		got := make([]byte, 1500)
+		n, err := conn.Read(got)
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("read dns-over-tcp answer within %v budget: %v (elapsed %v)", budget, err, elapsed)
+		}
+		if string(got[:n]) != msg {
+			t.Fatalf("answer = %q, want %q", got[:n], msg)
+		}
+		if elapsed > budget {
+			t.Fatalf("answer took %v, want under %v (a real resolver would have given up)", elapsed, budget)
+		}
+	}
+
+	// A resolver like nslookup gives up after ~2s; the fast-fail path must
+	// answer well within that even though the underlying dial never returns
+	// on its own within the test.
+	conn1 := dial()
+	defer conn1.Close()
+	query(conn1, "first-query", 2*time.Second)
+
+	// A second query shortly after (the resolver's own retry, or a second
+	// hostname lookup) must hit the cached failure and answer fast too,
+	// instead of queuing up behind another slow dial attempt.
+	conn2 := dial()
+	defer conn2.Close()
+	query(conn2, "second-query", 500*time.Millisecond)
 }

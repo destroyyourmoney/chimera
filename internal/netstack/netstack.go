@@ -22,6 +22,7 @@ package netstack
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -53,7 +54,27 @@ const (
 
 	dnsPort           = 53
 	dnsOverTCPTimeout = 5 * time.Second
+
+	// udpCarrierDialTimeout bounds how long a flow waits on a UDP/QUIC
+	// carrier dial before treating it as unavailable. A real QUIC dial
+	// failure (handshake/idle timeout) can take 10s of seconds -- far past
+	// what any DNS resolver waits (nslookup: 2s, most browsers: a few
+	// seconds), so waiting for the real failure before falling back to
+	// DNS-over-TCP (relayDNSOverTCP) means the fallback always loses the
+	// race against the resolver giving up first. See ensureUDPCarrier.
+	udpCarrierDialTimeout = 1500 * time.Millisecond
+	// udpCarrierRetryBackoff: once a dial has been given up on as slow/failed,
+	// don't retry it for every subsequent flow (each DNS query is its own UDP
+	// flow) -- that would just serialize every query behind another doomed
+	// multi-second dial. Recheck after this backoff in case the network
+	// recovered.
+	udpCarrierRetryBackoff = 30 * time.Second
 )
+
+// errUDPCarrierSlow is returned by ensureUDPCarrier when the dial hasn't
+// finished within udpCarrierDialTimeout; the real dial keeps running in the
+// background (see ensureUDPCarrier's doc comment).
+var errUDPCarrierSlow = errors.New("netstack: udp carrier dial exceeded fast-fail timeout")
 
 // TCPDialer bridges a TCP flow's original destination to a carrier stream.
 // Satisfied by *endpoint.Pool / *endpoint.AutoPool.
@@ -83,6 +104,12 @@ type Stack struct {
 	// why a fresh carrier per flow was the bug this replaced).
 	udpMu      sync.Mutex
 	udpCarrier carrier.UDPCarrier
+	// udpDialErr/udpDialErrAt cache the outcome of the last dial attempt that
+	// was given up on as slow (see udpCarrierDialTimeout) so flows arriving
+	// within udpCarrierRetryBackoff fail fast instead of piling up behind
+	// another doomed dial.
+	udpDialErr   error
+	udpDialErrAt time.Time
 	// udpFlows demuxes the one shared carrier's Receive loop back to each
 	// flow's own inbound channel by assocID.
 	udpFlows sync.Map // assocID uint16 -> chan []byte
@@ -226,19 +253,92 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) bool {
 // datagramMux, see internal/quic/datagram.go, already dials/dispatches per
 // assocID on a single connection) -- this just makes the client actually use
 // that instead of paying a fresh connection per flow.
+//
+// The dial itself is bounded by udpCarrierDialTimeout and run in the
+// background rather than held under udpMu: a real QUIC dial failure
+// (handshake/idle timeout deep in quic-go) can take far longer than any DNS
+// resolver waits, so a flow gives up and reports "unavailable" quickly
+// (falling through to relayDNSOverTCP for DNS) while the slow dial keeps
+// running -- if it eventually succeeds, a later flow picks up the now-ready
+// shared carrier. A short failure cache (udpDialErr/At) keeps the next
+// flows -- e.g. every retry a stub resolver sends -- from each queuing up
+// behind their own doomed dial attempt.
 func (s *Stack) ensureUDPCarrier() (carrier.UDPCarrier, error) {
 	s.udpMu.Lock()
-	defer s.udpMu.Unlock()
 	if s.udpCarrier != nil {
-		return s.udpCarrier, nil
+		uc := s.udpCarrier
+		s.udpMu.Unlock()
+		return uc, nil
 	}
-	uc, err := s.udp.DialUDPCarrier()
-	if err != nil {
+	if s.udpDialErr != nil && time.Since(s.udpDialErrAt) < udpCarrierRetryBackoff {
+		err := s.udpDialErr
+		s.udpMu.Unlock()
 		return nil, err
 	}
-	s.udpCarrier = uc
-	go s.udpDispatchLoop(uc)
-	return uc, nil
+	s.udpMu.Unlock()
+
+	type dialResult struct {
+		uc  carrier.UDPCarrier
+		err error
+	}
+	done := make(chan dialResult, 1)
+	go func() {
+		uc, err := s.udp.DialUDPCarrier()
+		done <- dialResult{uc, err}
+	}()
+
+	select {
+	case r := <-done:
+		s.udpMu.Lock()
+		defer s.udpMu.Unlock()
+		if r.err != nil {
+			s.udpDialErr, s.udpDialErrAt = r.err, time.Now()
+			return nil, r.err
+		}
+		if s.udpCarrier != nil {
+			// Another flow's dial (or a previous slow one finishing late,
+			// see below) already won; don't leak this one.
+			go r.uc.Close()
+			return s.udpCarrier, nil
+		}
+		s.udpCarrier = r.uc
+		s.udpDialErr = nil
+		go s.udpDispatchLoop(r.uc)
+		return r.uc, nil
+
+	case <-time.After(udpCarrierDialTimeout):
+		err := errUDPCarrierSlow
+		s.udpMu.Lock()
+		s.udpDialErr, s.udpDialErrAt = err, time.Now()
+		s.udpMu.Unlock()
+		// Let the real dial keep running; if it eventually succeeds, make it
+		// available to later flows instead of throwing the connection away.
+		go func() {
+			r := <-done
+			s.udpMu.Lock()
+			defer s.udpMu.Unlock()
+			select {
+			case <-s.udpCtx.Done():
+				if r.uc != nil {
+					r.uc.Close()
+				}
+				return
+			default:
+			}
+			if r.err != nil {
+				s.udpDialErr, s.udpDialErrAt = r.err, time.Now()
+				return
+			}
+			if s.udpCarrier != nil {
+				r.uc.Close()
+				return
+			}
+			s.udpCarrier = r.uc
+			s.udpDialErr = nil
+			go s.udpDispatchLoop(r.uc)
+		}()
+		return nil, err
+	}
 }
 
 // udpDispatchLoop is the single reader of the shared carrier's Receive
