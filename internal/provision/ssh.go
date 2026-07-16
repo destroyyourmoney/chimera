@@ -56,19 +56,41 @@ const (
 	chimeraLabel = "io.chimera.managed=true"
 )
 
+// ListenerSpec is one additional transport listener to launch on the same
+// box as the primary Reality/TCP one (ROADMAP2 §3/§4 multi-transport
+// support): "the anti-censorship picker offers 4 transports, so a fully
+// stocked server should actually run all 4 processes, not just Reality".
+// Transport is one of "quic", "ss", "dot" -- Reality is always the primary
+// listener (DeploySpec.ServerPort) and must not be repeated here.
+type ListenerSpec struct {
+	Transport string
+	Port      int
+}
+
+// DeployedListener is one listener buildDeployScript actually launched --
+// what DeployResult.Listeners reports back, e.g. for an operator script to
+// loop over and call `chimera-control-cli catalog add-listener` once per
+// entry (or pass the same list straight into `catalog add`'s inline
+// `listeners`, since the admin API accepts both -- see adminapi.go).
+type DeployedListener struct {
+	Transport string
+	Port      int
+}
+
 // DeploySpec describes a single server deployment requested by the operator.
 type DeploySpec struct {
-	Host         string // VPS host/IP — the SSH target and the link host
-	SSHPort      int    // SSH port (default 22)
-	StealHost    string // steal-host "host:port" (default www.microsoft.com:443)
-	ServerPort   int    // CHIMERA listen port (default 443)
-	ShortIDCount int    // number of short IDs to mint (default 1)
-	Repo         string // git URL to clone (default GitHub CHIMERA repo)
-	Ref          string // branch/tag/commit (default main)
-	Image        string // docker image tag (default chimera-server:latest)
-	Container    string // container name (default chimera-server)
-	Transport    string // link transport hint: auto|quic|tcp (default auto)
-	SNI          string // link SNI (default = steal-host's hostname)
+	Host           string         // VPS host/IP — the SSH target and the link host
+	SSHPort        int            // SSH port (default 22)
+	StealHost      string         // steal-host "host:port" (default www.microsoft.com:443)
+	ServerPort     int            // CHIMERA listen port (default 443) -- the primary Reality/TCP listener
+	ExtraListeners []ListenerSpec // additional transport listeners on the same box, same keypair (default none)
+	ShortIDCount   int            // number of short IDs to mint (default 1)
+	Repo           string         // git URL to clone (default GitHub CHIMERA repo)
+	Ref            string         // branch/tag/commit (default main)
+	Image          string         // docker image tag (default chimera-server:latest)
+	Container      string         // container name (default chimera-server)
+	Transport      string         // link transport hint: auto|quic|tcp (default auto)
+	SNI            string         // link SNI (default = steal-host's hostname)
 }
 
 // DeployResult is what the operator hands to users (Subscription) or shares
@@ -78,6 +100,14 @@ type DeployResult struct {
 	ShortIDs     []string
 	Links        []string
 	Subscription string
+
+	// Listeners is every transport listener this deploy actually launched --
+	// always starts with {"reality", spec.ServerPort}, followed by one entry
+	// per spec.ExtraListeners in order. Feed this straight into
+	// internal/controlplane's catalog (CatalogServer.Listeners or repeated
+	// AddListener calls) to register the server with every transport it
+	// really offers, not just Reality.
+	Listeners []DeployedListener
 }
 
 // CommandRunner executes one shell script on the target host and returns its
@@ -99,6 +129,9 @@ func (d *SSHDeployer) Deploy(ctx context.Context, spec DeploySpec) (DeployResult
 	if d.Runner == nil {
 		return DeployResult{}, fmt.Errorf("provision: nil runner")
 	}
+	if err := validateExtraListeners(spec); err != nil {
+		return DeployResult{}, err
+	}
 
 	sids, err := mintShortIDs(spec.ShortIDCount)
 	if err != nil {
@@ -115,10 +148,10 @@ func (d *SSHDeployer) Deploy(ctx context.Context, spec DeploySpec) (DeployResult
 		if strings.Contains(err.Error(), portInUseMarker) ||
 			strings.Contains(err.Error(), "address already in use") {
 			return DeployResult{}, fmt.Errorf(
-				"provision: port %d is already in use on this server "+
-					"(another process or a leftover container is bound to "+
-					"it) -- free the port or pick a different one and try "+
-					"again", spec.ServerPort)
+				"provision: one of the requested ports (%s) is already in "+
+					"use on this server (another process or a leftover "+
+					"container is bound to it) -- free the port or pick a "+
+					"different one and try again", describePorts(spec))
 		}
 		return DeployResult{}, fmt.Errorf("provision: remote deploy failed: %w", err)
 	}
@@ -131,9 +164,24 @@ func (d *SSHDeployer) Deploy(ctx context.Context, spec DeploySpec) (DeployResult
 	return d.buildResult(spec, sids, pub)
 }
 
+// describePorts renders every port this deploy will bind, for the
+// port-in-use error message -- the primary Reality/TCP port plus each
+// ExtraListeners entry's port.
+func describePorts(spec DeploySpec) string {
+	ports := []string{fmt.Sprintf("%d", spec.ServerPort)}
+	for _, l := range spec.ExtraListeners {
+		ports = append(ports, fmt.Sprintf("%d", l.Port))
+	}
+	return strings.Join(ports, ", ")
+}
+
 // buildResult assembles links + subscription from the deployment outputs.
 func (d *SSHDeployer) buildResult(spec DeploySpec, sids []string, pub string) (DeployResult, error) {
 	res := DeployResult{PublicKey: pub, ShortIDs: sids}
+	res.Listeners = append(res.Listeners, DeployedListener{Transport: "reality", Port: spec.ServerPort})
+	for _, l := range spec.ExtraListeners {
+		res.Listeners = append(res.Listeners, DeployedListener{Transport: l.Transport, Port: l.Port})
+	}
 	host, port := splitHostPort(spec.Host, spec.ServerPort)
 	for _, sid := range sids {
 		res.Links = append(res.Links, link.Build(link.Profile{
@@ -157,6 +205,34 @@ func (d *SSHDeployer) buildResult(spec DeploySpec, sids []string, pub string) (D
 	b.WriteString(primary + "\n")
 	res.Subscription = b.String()
 	return res, nil
+}
+
+// validateExtraListeners rejects malformed multi-transport requests before
+// any script gets built/run: an unknown transport would silently pass
+// `-transport garbage` to `chimera server` (which just fails remotely, much
+// harder to diagnose than a local error), and a port collision (with the
+// primary listener or between two extras) would make the second `docker
+// run` fail with a confusing bind error instead of a clear one up front.
+func validateExtraListeners(spec DeploySpec) error {
+	seenPorts := map[int]bool{spec.ServerPort: true}
+	for _, l := range spec.ExtraListeners {
+		switch l.Transport {
+		case "quic", "ss", "dot":
+		case "reality", "tcp", "":
+			return fmt.Errorf("provision: ExtraListeners entry has transport %q -- "+
+				"Reality/TCP is always the primary listener (ServerPort), don't repeat it here", l.Transport)
+		default:
+			return fmt.Errorf("provision: unknown ExtraListeners transport %q (want quic, ss, or dot)", l.Transport)
+		}
+		if l.Port <= 0 || l.Port > 65535 {
+			return fmt.Errorf("provision: ExtraListeners transport %q has invalid port %d", l.Transport, l.Port)
+		}
+		if seenPorts[l.Port] {
+			return fmt.Errorf("provision: port %d is used by more than one listener", l.Port)
+		}
+		seenPorts[l.Port] = true
+	}
+	return nil
 }
 
 // normalize fills zero-valued spec fields with defaults.

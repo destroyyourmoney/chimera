@@ -12,6 +12,25 @@ import 'package:http/http.dart' as http;
 import 'account_store.dart';
 import 'theme.dart';
 
+/// One transport endpoint a [CatalogServer] actually has a running listener
+/// for (ROADMAP2 §3/§4 multi-transport support --
+/// internal/controlplane/catalog.go's `CatalogListener`). `transport` is the
+/// same short code `internal/subscription.Parse` reads out of a `mode=`
+/// query param: `'reality'` for the primary Reality/TCP listener (dialed
+/// with no `mode=` param at all -- see `obfuscationModeQueryParam`), or
+/// `'quic'`/`'ss'`/`'dot'`.
+class CatalogListener {
+  const CatalogListener({required this.transport, required this.port});
+
+  factory CatalogListener.fromJson(Map<String, dynamic> json) => CatalogListener(
+    transport: json['transport'] as String? ?? '',
+    port: json['port'] as int? ?? 0,
+  );
+
+  final String transport;
+  final int port;
+}
+
 class CatalogServer {
   const CatalogServer({
     required this.id,
@@ -24,20 +43,39 @@ class CatalogServer {
     required this.country,
     required this.loadPct,
     required this.healthy,
+    this.listeners = const [],
   });
 
-  factory CatalogServer.fromJson(Map<String, dynamic> json) => CatalogServer(
-    id: '${json['id']}',
-    host: json['host'] as String? ?? '',
-    port: json['port'] as int? ?? 443,
-    pubKey: json['pubkey'] as String? ?? '',
-    sni: json['sni'] as String? ?? '',
-    fingerprint: json['fp'] as String? ?? '',
-    city: json['city'] as String? ?? '',
-    country: json['country'] as String? ?? '',
-    loadPct: json['load_pct'] as int? ?? 0,
-    healthy: json['healthy'] as bool? ?? true,
-  );
+  factory CatalogServer.fromJson(Map<String, dynamic> json) {
+    final port = json['port'] as int? ?? 443;
+    final rawListeners = json['listeners'] as List<dynamic>?;
+    // A control-plane that predates multi-transport listeners (or a row
+    // that hasn't been backfilled) sends no `listeners` array at all --
+    // synthesize the one Reality/TCP listener `host`/`port` always implied,
+    // same default internal/controlplane/catalog.go's `CatalogStore.Add`
+    // applies server-side. Never leave this empty: everything downstream
+    // (CatalogServer.portFor, main.dart's _upsertCuratedServer) treats
+    // "no listener for transport X" as "don't offer X for this server", and
+    // an empty list would wrongly disable Reality too.
+    final listeners = (rawListeners == null || rawListeners.isEmpty)
+        ? [CatalogListener(transport: 'reality', port: port)]
+        : rawListeners
+              .map((e) => CatalogListener.fromJson(e as Map<String, dynamic>))
+              .toList();
+    return CatalogServer(
+      id: '${json['id']}',
+      host: json['host'] as String? ?? '',
+      port: port,
+      pubKey: json['pubkey'] as String? ?? '',
+      sni: json['sni'] as String? ?? '',
+      fingerprint: json['fp'] as String? ?? '',
+      city: json['city'] as String? ?? '',
+      country: json['country'] as String? ?? '',
+      loadPct: json['load_pct'] as int? ?? 0,
+      healthy: json['healthy'] as bool? ?? true,
+      listeners: listeners,
+    );
+  }
 
   final String id;
   final String host;
@@ -49,14 +87,35 @@ class CatalogServer {
   final String country;
   final int loadPct;
   final bool healthy;
+  final List<CatalogListener> listeners;
 
-  String get flag => _flagFor(country);
+  String get flag => flagForCountry(country);
+
+  /// The port to dial for [transportParam] (an `obfuscationModeQueryParam`
+  /// value: `''`/`'reality'` for Reality, else `'quic'`/`'ss'`/`'dot'`), or
+  /// null if this server has no listener for that transport -- callers must
+  /// treat null as "not offered here", never fall back to guessing a port.
+  int? portFor(String transportParam) {
+    final wanted = transportParam.isEmpty ? 'reality' : transportParam;
+    for (final l in listeners) {
+      if (l.transport == wanted) return l.port;
+    }
+    return null;
+  }
+
+  /// The set of `obfuscationModeQueryParam` values this server actually
+  /// offers -- drives which Anti-censorship cards are selectable for the
+  /// currently chosen server (ROADMAP2 §0 "no false promises": don't let the
+  /// user pick a transport this server can't actually serve).
+  Set<String> get availableTransportParams =>
+      listeners.map((l) => l.transport == 'reality' ? '' : l.transport).toSet();
 }
 
 /// Best-effort flag emoji from a country name -- cosmetic only; an unknown
 /// country just falls back to a generic marker rather than blocking
-/// rendering on a full ISO-3166 lookup table.
-String _flagFor(String country) {
+/// rendering on a full ISO-3166 lookup table. Shared with main.dart's Home
+/// server-card, which shows the same flag for the currently selected server.
+String flagForCountry(String country) {
   const known = {
     'Sweden': '🇸🇪', 'Switzerland': '🇨🇭', 'Netherlands': '🇳🇱', 'Serbia': '🇷🇸',
     'Slovakia': '🇸🇰', 'Belgium': '🇧🇪', 'Romania': '🇷🇴', 'Germany': '🇩🇪',

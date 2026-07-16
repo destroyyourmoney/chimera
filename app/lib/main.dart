@@ -30,7 +30,7 @@ import 'diagnostics.dart';
 import 'network_protection.dart';
 import 'settings_hub_page.dart';
 import 'settings_store.dart';
-import 'speed_sparkline.dart';
+import 'signal_core.dart';
 import 'theme.dart';
 
 /// Filesystem path to a bundled tray/window icon. tray_manager needs a real
@@ -90,6 +90,66 @@ class _BootstrapTrayListener with TrayListener {
 }
 
 final _bootstrapTrayListener = _BootstrapTrayListener();
+
+/// Anchors the popover just above (or, if the taskbar isn't at the bottom,
+/// below) the tray icon's own bounds, clamped to the work area of the
+/// display the icon lives on -- a fixed position derived fresh from the
+/// icon every time, never wherever the OS last left the window. Shared by
+/// _HomePageState (post-login) and AccountGate's first-run key-entry
+/// screen, so neither path ever leaves the window sitting at the runner's
+/// hardcoded (10, 10) startup origin (windows/runner/main.cpp) with no way
+/// to move, minimize, or dismiss it -- the window is deliberately
+/// non-resizable/non-minimizable everywhere (Mullvad-style popover, see
+/// main()'s windowOptions), so anchoring is the only way it ever ends up
+/// somewhere the user can reach and click away from to dismiss.
+Future<void> _showWindowAtTray() async {
+  final trayBounds = await trayManager.getBounds();
+  if (trayBounds != null) {
+    final winSize = await windowManager.getSize();
+    const margin = 8.0;
+    var left = trayBounds.left + trayBounds.width / 2 - winSize.width / 2;
+    var top = trayBounds.top - winSize.height - margin;
+    final workArea = await _workAreaContaining(
+      Offset(trayBounds.left, trayBounds.top),
+    );
+    if (top < workArea.top) {
+      // Taskbar on top/side of the screen: drop below the icon instead.
+      top = trayBounds.bottom + margin;
+    }
+    left = left.clamp(
+      workArea.left + margin,
+      workArea.left + workArea.width - winSize.width - margin,
+    );
+    top = top.clamp(
+      workArea.top + margin,
+      workArea.top + workArea.height - winSize.height - margin,
+    );
+    await windowManager.setPosition(Offset(left, top));
+  }
+  await windowManager.show();
+  await windowManager.focus();
+}
+
+/// The work-area (screen bounds minus taskbar) of the display containing
+/// [point], falling back to the primary display if lookup fails.
+Future<Rect> _workAreaContaining(Offset point) async {
+  try {
+    final displays = await screenRetriever.getAllDisplays();
+    for (final d in displays) {
+      final pos = d.visiblePosition;
+      final size = d.visibleSize ?? d.size;
+      if (pos == null) continue;
+      final rect = Rect.fromLTWH(pos.dx, pos.dy, size.width, size.height);
+      if (rect.contains(point)) return rect;
+    }
+    final primary = await screenRetriever.getPrimaryDisplay();
+    final pos = primary.visiblePosition ?? Offset.zero;
+    final size = primary.visibleSize ?? primary.size;
+    return Rect.fromLTWH(pos.dx, pos.dy, size.width, size.height);
+  } catch (_) {
+    return Rect.fromLTWH(0, 0, 1920, 1080);
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -191,9 +251,13 @@ class _AccountGateState extends State<AccountGate> {
         // No saved account key: there's no tray-driven flow that would ever
         // lead the user to AccountEntryPage on its own (unlike HomePage,
         // which the tray icon toggles), so show the window outright instead
-        // of leaving it hidden with nothing on screen to click.
-        windowManager.show();
-        windowManager.focus();
+        // of leaving it hidden with nothing on screen to click. Anchor it
+        // next to the tray icon like every other popover show -- a plain
+        // show()/focus() here left the window at the runner's hardcoded
+        // (10, 10) startup position, and since the popover is deliberately
+        // non-resizable/non-minimizable/always-on-top, that made it
+        // impossible to move, minimize, or reach to dismiss.
+        _showWindowAtTray();
       }
     });
   }
@@ -404,16 +468,22 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
-  String _obfuscationLabel(ObfuscationMode mode) {
-    switch (mode) {
-      case ObfuscationMode.reality:
-        return 'Reality';
-      case ObfuscationMode.quicH3:
+  /// Label for a transport by its `obfuscationModeQueryParam` value (`''`
+  /// for Reality, else `quic`/`ss`/`dot`) rather than by [ObfuscationMode] --
+  /// used where the actually-resolved transport for the selected server
+  /// (which can differ from the global `_settings.obfuscationMode` when that
+  /// server doesn't offer it -- see `_upsertCuratedServer`'s fallback) needs
+  /// a display name, not just the user's global preference.
+  String _transportLabelFromParam(String param) {
+    switch (param) {
+      case 'quic':
         return 'QUIC / H3';
-      case ObfuscationMode.shadowsocksAead:
+      case 'ss':
         return 'Shadowsocks-AEAD';
-      case ObfuscationMode.dnsOverTcp:
+      case 'dot':
         return 'DNS-over-TCP';
+      default:
+        return 'Reality';
     }
   }
 
@@ -422,8 +492,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
     return '${(n / 1024 / 1024).toStringAsFixed(1)} MB';
   }
-
-  String _fmtRate(double bytesPerSec) => '${_fmtBytes(bytesPerSec.round())}/s';
 
   Future<void> _persist() => _store.save(_settings);
 
@@ -485,7 +553,10 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       final account = await AccountStore().load();
 
       final err = await _service!.connect(
-        _settings.subscriptionText(),
+        _settings.subscriptionText(
+          token: account?.token,
+          shortIdHex: account?.shortIdHex,
+        ),
         primaryServer: PrimaryServer(
           host: resolved.host,
           port: resolved.port,
@@ -675,13 +746,20 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   /// background refresh), so baking one in at selection time would go stale
   /// long before the server is deselected. _connect/_setNetworkProtection
   /// read the live token from AccountStore instead, at connect time.
+  ///
+  /// Different transports can live on different ports on the same server
+  /// (ROADMAP2 §3/§4 multi-transport support -- see `CatalogServer.portFor`),
+  /// so this dials whichever port the *currently selected* Anti-censorship
+  /// mode actually listens on, not always `server.port`. If this server has
+  /// no listener at all for that mode (not every server runs all 4
+  /// transports), it falls back to the server's Reality listener rather
+  /// than building a link that's guaranteed to fail -- "no false promises"
+  /// means Connect should work with whatever was actually picked, even if
+  /// that's not the globally preferred transport for this one server.
   void _upsertCuratedServer(CatalogServer server) {
-    final mode = switch (_settings.obfuscationMode) {
-      ObfuscationMode.reality => '',
-      ObfuscationMode.quicH3 => 'quic',
-      ObfuscationMode.shadowsocksAead => 'ss',
-      ObfuscationMode.dnsOverTcp => 'dot',
-    };
+    final preferred = obfuscationModeQueryParam(_settings.obfuscationMode);
+    final port = server.portFor(preferred) ?? server.portFor('') ?? server.port;
+    final mode = server.portFor(preferred) != null ? preferred : '';
     final query = <String>[
       'pbk=${Uri.encodeQueryComponent(server.pubKey)}',
       if (server.sni.isNotEmpty) 'sni=${Uri.encodeQueryComponent(server.sni)}',
@@ -689,7 +767,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       if (server.fingerprint.isNotEmpty)
         'fp=${Uri.encodeQueryComponent(server.fingerprint)}',
     ].join('&');
-    final link = 'chimera://${server.host}:${server.port}?$query#${server.id}';
+    final link = 'chimera://${server.host}:$port?$query#${server.id}';
 
     final existingIndex = _settings.servers.indexWhere(
       (s) => s.id == 'catalog-${server.id}',
@@ -698,6 +776,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       id: 'catalog-${server.id}',
       label: '${server.city}, ${server.country}',
       link: link,
+      catalogListeners: server.listeners,
     );
     if (existingIndex >= 0) {
       _settings.servers[existingIndex] = entry;
@@ -706,13 +785,34 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
+  /// The transports the primary (first-saved) server actually has listeners
+  /// for, or null if unknown (no server saved yet, or a BYO/legacy link with
+  /// no recorded catalog listeners) -- see AnticensorshipPage's doc comment
+  /// on availableTransportParams.
+  Set<String>? _primaryServerAvailableTransports() {
+    if (_settings.servers.isEmpty) return null;
+    final listeners = _settings.servers.first.catalogListeners;
+    if (listeners.isEmpty) return null;
+    return listeners
+        .map((l) => l.transport == 'reality' ? '' : l.transport)
+        .toSet();
+  }
+
   Future<void> _openAnticensorship() async {
     await Navigator.of(context).push(
       ChimeraPageRoute(
         builder: (_) => AnticensorshipPage(
           current: _settings.obfuscationMode,
+          availableTransportParams: _primaryServerAvailableTransports(),
           onChanged: (mode) async {
-            setState(() => _settings.obfuscationMode = mode);
+            setState(() {
+              _settings.obfuscationMode = mode;
+              // Keep any already-picked catalog server's link in sync --
+              // otherwise this switch has no effect on the next Connect
+              // until the server is reselected. See
+              // ChimeraSettings.applyObfuscationModeToCatalogServers.
+              _settings.applyObfuscationModeToCatalogServers(mode);
+            });
             await _persist();
           },
         ),
@@ -752,6 +852,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           onSetCustomDns: _setCustomDns,
           buildDiagnosticsReport: _buildDiagnosticsReport,
           onDisconnectAndQuit: _disconnectAndQuit,
+          state: _state,
+          downSamples: _downSamples,
         ),
       ),
     );
@@ -831,16 +933,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     exit(0);
   }
 
-  /// Best-effort SNI (fallback: host) of the primary server, for the
-  /// connected-state subtitle ("Disguised as HTTPS to {sni or host}").
-  /// Display-only derivation; does not touch connection state.
-  String _disguiseHost() {
-    if (_settings.servers.isEmpty) return '';
-    final p = _parseChimeraLink(_settings.servers.first.link);
-    if (!p.ok) return '';
-    return p.sni.isNotEmpty ? p.sni : p.host;
-  }
-
   // Left click: toggle the popover open/closed, like Mullvad/Windows tray
   // flyouts -- never a context menu (that's reserved for right click).
   @override
@@ -872,58 +964,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     await _showAtTray();
   }
 
-  /// Anchors the popover just above (or, if the taskbar isn't at the
-  /// bottom, below) the tray icon's own bounds, clamped to the work area of
-  /// the display the icon lives on -- a fixed position derived fresh from
-  /// the icon every time, never wherever the OS last left the window.
-  Future<void> _showAtTray() async {
-    final trayBounds = await trayManager.getBounds();
-    if (trayBounds != null) {
-      final winSize = await windowManager.getSize();
-      const margin = 8.0;
-      var left = trayBounds.left + trayBounds.width / 2 - winSize.width / 2;
-      var top = trayBounds.top - winSize.height - margin;
-      final workArea = await _workAreaContaining(
-        Offset(trayBounds.left, trayBounds.top),
-      );
-      if (top < workArea.top) {
-        // Taskbar on top/side of the screen: drop below the icon instead.
-        top = trayBounds.bottom + margin;
-      }
-      left = left.clamp(
-        workArea.left + margin,
-        workArea.left + workArea.width - winSize.width - margin,
-      );
-      top = top.clamp(
-        workArea.top + margin,
-        workArea.top + workArea.height - winSize.height - margin,
-      );
-      await windowManager.setPosition(Offset(left, top));
-    }
-    await windowManager.show();
-    await windowManager.focus();
-  }
-
-  /// The work-area (screen bounds minus taskbar) of the display containing
-  /// [point], falling back to the primary display if lookup fails.
-  Future<Rect> _workAreaContaining(Offset point) async {
-    try {
-      final displays = await screenRetriever.getAllDisplays();
-      for (final d in displays) {
-        final pos = d.visiblePosition;
-        final size = d.visibleSize ?? d.size;
-        if (pos == null) continue;
-        final rect = Rect.fromLTWH(pos.dx, pos.dy, size.width, size.height);
-        if (rect.contains(point)) return rect;
-      }
-      final primary = await screenRetriever.getPrimaryDisplay();
-      final pos = primary.visiblePosition ?? Offset.zero;
-      final size = primary.visibleSize ?? primary.size;
-      return Rect.fromLTWH(pos.dx, pos.dy, size.width, size.height);
-    } catch (_) {
-      return Rect.fromLTWH(0, 0, 1920, 1080);
-    }
-  }
+  /// Anchors the popover next to the tray icon -- see the top-level
+  /// _showWindowAtTray, shared with AccountGate's first-run key-entry show.
+  Future<void> _showAtTray() => _showWindowAtTray();
 
   @override
   void onTrayMenuItemClick(MenuItem menuItem) async {
@@ -972,51 +1015,43 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     final tokens = Theme.of(context).extension<ChimeraTokens>()!;
+    // Layout mirrors the redesign artifact's Windows popover frame exactly:
+    // brand row -> signal core -> status row -> server card -> transport/
+    // latency pills -> Connect/Disconnect pinned to the bottom via the
+    // Expanded/scroll split below (the artifact's `.spacer{flex:1}`).
+    // Upload/download throughput and per-endpoint RTT used to render here
+    // too; the artifact's Home has neither, so that live detail moved to
+    // Support (see settings_hub_page.dart/support_page.dart).
     return Scaffold(
       body: SafeArea(
-        child: ListView(
+        child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
-          children: [
-            _buildBrandRow(context, tokens),
-            if (_initError != null) ...[
-              const SizedBox(height: 12),
-              _buildEngineErrorBanner(context, tokens),
+          child: Column(
+            children: [
+              _buildBrandRow(context, tokens),
+              if (_initError != null) ...[
+                const SizedBox(height: 12),
+                _buildEngineErrorBanner(context, tokens),
+              ],
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 6),
+                      SignalCore(active: _state.isConnected),
+                      _buildStatusRow(context, tokens),
+                      const SizedBox(height: 20),
+                      _buildServerCard(context, tokens),
+                      const SizedBox(height: 14),
+                      _buildPillsRow(context, tokens),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              _buildConnectButton(context),
             ],
-            const SizedBox(height: 20),
-            _buildStatusCard(context, tokens),
-            const SizedBox(height: 20),
-            _buildSectionLabel(context, tokens, 'Quick access'),
-            const SizedBox(height: 8),
-            _buildNavRow(
-              context,
-              tokens,
-              title: 'Choose server',
-              subtitle: _settings.lastConnectedServerId ?? 'Curated locations',
-              onTap: _openCatalog,
-            ),
-            const SizedBox(height: 8),
-            _buildNavRow(
-              context,
-              tokens,
-              title: 'Anti-censorship',
-              subtitle: _obfuscationLabel(_settings.obfuscationMode),
-              onTap: _openAnticensorship,
-            ),
-            const SizedBox(height: 8),
-            _buildNavRow(
-              context,
-              tokens,
-              title: 'Account',
-              subtitle: 'Key, expiry, devices',
-              onTap: _openAccount,
-            ),
-            if (_state.isConnected && _state.endpoints.isNotEmpty) ...[
-              const SizedBox(height: 20),
-              _buildSectionLabel(context, tokens, 'Endpoint health'),
-              const SizedBox(height: 8),
-              _buildEndpointHealth(context, tokens),
-            ],
-          ],
+          ),
         ),
       ),
     );
@@ -1066,6 +1101,18 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           ),
         ),
         Tooltip(
+          message: 'Account',
+          child: SizedBox(
+            width: 30,
+            height: 30,
+            child: IconButton(
+              icon: Icon(Icons.person_outline, size: 18, color: tokens.textMuted),
+              padding: EdgeInsets.zero,
+              onPressed: _openAccount,
+            ),
+          ),
+        ),
+        Tooltip(
           message: 'Settings',
           child: SizedBox(
             width: 30,
@@ -1112,220 +1159,126 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     );
   }
 
-  Widget _buildStatusCard(BuildContext context, ChimeraTokens tokens) {
+  /// Status label under the signal core -- "Protected" only while actually
+  /// connected, matching the artifact's frame exactly (it never shows a
+  /// connected-but-unhealthy state here; that detail lives in Support's
+  /// endpoint health list now).
+  Widget _buildStatusRow(BuildContext context, ChimeraTokens tokens) {
     final scheme = Theme.of(context).colorScheme;
     final connected = _state.isConnected;
     final connecting = !connected && _busy;
-    final statusWord = connecting
+    final label = connecting
         ? 'Connecting…'
-        : (connected ? 'Connected' : 'Disconnected');
-    final dotColor = connected ? scheme.primary : tokens.textFaint;
-    final host = _disguiseHost();
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: connected ? tokens.accentSoft : tokens.surface2,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: connected
-              ? scheme.primary.withValues(alpha: 0.4)
-              : Theme.of(context).dividerColor,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 9,
-                height: 9,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: dotColor,
-                  boxShadow: connected
-                      ? [
-                          BoxShadow(
-                            color: scheme.primary.withValues(alpha: 0.6),
-                            blurRadius: 6,
-                            spreadRadius: 1,
-                          ),
-                        ]
-                      : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                statusWord,
-                style: TextStyle(
-                  fontFamily: 'Plex Sans',
-                  fontWeight: FontWeight.w600,
-                  fontSize: 20,
-                  color: scheme.onSurface,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            connected
-                ? 'Disguised as HTTPS to ${host.isNotEmpty ? host : "your server"} '
-                      '· transport ${_state.transport}'
-                : 'Your traffic is not protected. Connect to disguise it as '
-                      'an ordinary HTTPS session to your configured host.',
-            style: TextStyle(
-              fontFamily: 'Plex Sans',
-              fontSize: 12.5,
-              color: tokens.textMuted,
-              height: 1.35,
-            ),
-          ),
-          if (connected) ...[
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildMetric(
-                    context,
-                    tokens,
-                    label: 'UPLOAD',
-                    value: _upSamples.isEmpty
-                        ? '0 B/s'
-                        : _fmtRate(_upSamples.last),
-                    arrow: '↑',
-                  ),
-                ),
-                Expanded(
-                  child: _buildMetric(
-                    context,
-                    tokens,
-                    label: 'DOWNLOAD',
-                    value: _downSamples.isEmpty
-                        ? '0 B/s'
-                        : _fmtRate(_downSamples.last),
-                    arrow: '↓',
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            SpeedSparkline(samples: _downSamples, color: scheme.primary),
-          ],
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: connected
-                ? OutlinedButton(
-                    onPressed: _busy ? null : _toggleConnection,
-                    child: const Text('Disconnect'),
-                  )
-                : ElevatedButton(
-                    onPressed: _busy ? null : _toggleConnection,
-                    child: Text(connecting ? 'Connecting…' : 'Connect'),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMetric(
-    BuildContext context,
-    ChimeraTokens tokens, {
-    required String label,
-    required String value,
-    required String arrow,
-  }) {
+        : (connected ? 'Protected' : 'Not protected');
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Text(
+          'STATUS',
+          style: monoStyle(
+            fontSize: 11.5,
+            weight: FontWeight.w500,
+            color: tokens.textFaint,
+          ).copyWith(letterSpacing: 1.2),
+        ),
+        const SizedBox(height: 4),
         Text(
           label,
           style: TextStyle(
             fontFamily: 'Plex Sans',
-            fontSize: 11,
             fontWeight: FontWeight.w600,
-            letterSpacing: 0.4,
-            color: tokens.textFaint,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          '$arrow $value',
-          style: monoStyle(
-            fontSize: 15,
-            weight: FontWeight.w500,
-            color: Theme.of(context).colorScheme.onSurface,
+            fontSize: 19,
+            color: connected ? scheme.primary : scheme.onSurface,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildSectionLabel(
-    BuildContext context,
-    ChimeraTokens tokens,
-    String text,
-  ) {
-    return Text(
-      text.toUpperCase(),
-      style: TextStyle(
-        fontFamily: 'Plex Sans',
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.6,
-        color: tokens.textFaint,
-      ),
-    );
+  /// Best-effort city/country/flag for the currently selected (last
+  /// connected) catalog server, read off the saved `ServerEntry.label`
+  /// ("City, Country") that `_upsertCuratedServer` writes -- null before any
+  /// server has ever been picked.
+  ({String city, String country, String flag})? _selectedServerDisplay() {
+    final id = _settings.lastConnectedServerId;
+    if (id == null) return null;
+    ServerEntry? entry;
+    for (final s in _settings.servers) {
+      if (s.id == 'catalog-$id') {
+        entry = s;
+        break;
+      }
+    }
+    if (entry == null) return null;
+    final parts = entry.label.split(',');
+    if (parts.isEmpty) return null;
+    final city = parts.first.trim();
+    final country = parts.length > 1 ? parts.sublist(1).join(',').trim() : '';
+    return (city: city, country: country, flag: flagForCountry(country));
   }
 
-  Widget _buildNavRow(
-    BuildContext context,
-    ChimeraTokens tokens, {
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
+  /// Compact server card (artifact: `.card.server-card`) -- the sole way to
+  /// see/change the selected location on Home, replacing the old
+  /// "Choose server" Quick-access row. Tapping it always opens the catalog,
+  /// whether or not a server is selected yet.
+  Widget _buildServerCard(BuildContext context, ChimeraTokens tokens) {
+    final info = _selectedServerDisplay();
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        borderRadius: BorderRadius.circular(11),
-        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        onTap: _openCatalog,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(11),
+            color: tokens.surface2,
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(color: Theme.of(context).dividerColor),
           ),
           child: Row(
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontFamily: 'Plex Sans',
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w500,
-                        color: Theme.of(context).colorScheme.onSurface,
-                      ),
-                    ),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontFamily: 'Plex Sans',
-                        fontSize: 12,
-                        color: tokens.textFaint,
-                      ),
-                    ),
-                  ],
+              if (info != null) ...[
+                SizedBox(
+                  width: 26,
+                  child: Text(info.flag, style: const TextStyle(fontSize: 16)),
                 ),
-              ),
-              Icon(Icons.chevron_right, color: tokens.textFaint, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        info.city,
+                        style: TextStyle(
+                          fontFamily: 'Plex Sans',
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13.5,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                      Text(
+                        info.country,
+                        style: TextStyle(
+                          fontFamily: 'Plex Sans',
+                          fontSize: 11.5,
+                          color: tokens.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else
+                Expanded(
+                  child: Text(
+                    'Choose a location',
+                    style: TextStyle(
+                      fontFamily: 'Plex Sans',
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13.5,
+                      color: Theme.of(context).colorScheme.onSurface,
+                    ),
+                  ),
+                ),
+              Icon(Icons.chevron_right, color: tokens.textFaint, size: 18),
             ],
           ),
         ),
@@ -1333,50 +1286,100 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     );
   }
 
-  Widget _buildEndpointHealth(BuildContext context, ChimeraTokens tokens) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(11),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        children: [
-          for (var i = 0; i < _state.endpoints.length; i++) ...[
-            if (i > 0)
-              Divider(height: 1, color: Theme.of(context).dividerColor),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(
-                children: [
-                  Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _state.endpoints[i].healthy
-                          ? scheme.primary
-                          : scheme.error,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      _state.endpoints[i].server,
-                      overflow: TextOverflow.ellipsis,
-                      style: monoStyle(fontSize: 12.5, color: scheme.onSurface),
-                    ),
-                  ),
-                  Text(
-                    '${_state.endpoints[i].rttMs} ms',
-                    style: monoStyle(fontSize: 12, color: tokens.textMuted),
-                  ),
-                ],
-              ),
-            ),
-          ],
+  /// Average RTT across healthy endpoints, for the latency pill -- null
+  /// (pill hidden) until connected with at least one measured endpoint.
+  String? _latencyLabel() {
+    if (!_state.isConnected) return null;
+    final rtts = _state.endpoints
+        .map((e) => e.rttMs)
+        .where((v) => v > 0)
+        .toList();
+    if (rtts.isEmpty) return null;
+    final avg = rtts.reduce((a, b) => a + b) ~/ rtts.length;
+    return '$avg ms';
+  }
+
+  /// Transport + latency pills (artifact: `.pill` / `.pill.muted`). The
+  /// transport pill is tappable -- it's the replacement for the old
+  /// "Anti-censorship" Quick-access row.
+  ///
+  /// Shows the transport the primary server's *saved link* actually resolves
+  /// to, not blindly `_settings.obfuscationMode` -- when that server doesn't
+  /// offer the globally preferred transport, `_upsertCuratedServer` already
+  /// fell back to one it does, and this pill has to agree with what Connect
+  /// will really dial (see that method's doc comment: "no false promises"
+  /// applies to what actually happens, not just to the picker's copy).
+  Widget _buildPillsRow(BuildContext context, ChimeraTokens tokens) {
+    final latency = _latencyLabel();
+    final resolved = _resolvePrimaryServer();
+    final transportLabel = _transportLabelFromParam(
+      resolved.ok ? resolved.transport : obfuscationModeQueryParam(_settings.obfuscationMode),
+    );
+    return Row(
+      children: [
+        _pill(
+          context,
+          tokens,
+          text: transportLabel,
+          accent: true,
+          onTap: _openAnticensorship,
+        ),
+        if (latency != null) ...[
+          const SizedBox(width: 8),
+          _pill(context, tokens, text: latency, accent: false),
         ],
+      ],
+    );
+  }
+
+  Widget _pill(
+    BuildContext context,
+    ChimeraTokens tokens, {
+    required String text,
+    required bool accent,
+    VoidCallback? onTap,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final child = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: accent ? tokens.accentSoft : tokens.neutralPill,
+        borderRadius: BorderRadius.circular(999),
       ),
+      child: Text(
+        text,
+        style: monoStyle(
+          fontSize: 10.5,
+          weight: FontWeight.w500,
+          color: accent ? scheme.primary : tokens.textMuted,
+        ),
+      ),
+    );
+    if (onTap == null) return child;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: child,
+      ),
+    );
+  }
+
+  Widget _buildConnectButton(BuildContext context) {
+    final connected = _state.isConnected;
+    final connecting = !connected && _busy;
+    return SizedBox(
+      width: double.infinity,
+      child: connected
+          ? OutlinedButton(
+              onPressed: _busy ? null : _toggleConnection,
+              child: const Text('Disconnect'),
+            )
+          : ElevatedButton(
+              onPressed: _busy ? null : _toggleConnection,
+              child: Text(connecting ? 'Connecting…' : 'Connect'),
+            ),
     );
   }
 }

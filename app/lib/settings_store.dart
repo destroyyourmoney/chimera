@@ -8,6 +8,8 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'catalog_page.dart' show CatalogListener;
+
 /// ServerEntry is one saved endpoint: an operator-facing [label] plus the
 /// underlying `chimera://` link exactly as produced by [link.Build] /
 /// entered by the user.
@@ -33,7 +35,8 @@ class ServerEntry {
     this.adminSshPassword,
     this.adminApiPort = 8901,
     this.adminToken,
-  });
+    List<CatalogListener>? catalogListeners,
+  }) : catalogListeners = catalogListeners ?? const [];
 
   factory ServerEntry.fromJson(Map<String, dynamic> json) => ServerEntry(
     id: json['id'] as String,
@@ -45,6 +48,9 @@ class ServerEntry {
     adminSshPassword: json['adminSshPassword'] as String?,
     adminApiPort: json['adminApiPort'] as int? ?? 8901,
     adminToken: json['adminToken'] as String?,
+    catalogListeners: (json['catalogListeners'] as List<dynamic>? ?? const [])
+        .map((e) => CatalogListener.fromJson(e as Map<String, dynamic>))
+        .toList(),
   );
 
   final String id;
@@ -56,6 +62,16 @@ class ServerEntry {
   String? adminSshPassword;
   int adminApiPort;
   String? adminToken;
+
+  /// Every transport listener the catalog reported for this server at the
+  /// time it was picked/last mode-switched (ROADMAP2 §3/§4 multi-transport
+  /// support) -- empty for BYO/legacy entries, which only ever have the one
+  /// transport baked into their link. Lets
+  /// [ChimeraSettings.applyObfuscationModeToCatalogServers] rewrite both the
+  /// `mode=` param *and* the actual host:port when the global Anti-
+  /// censorship setting changes, since different transports can live on
+  /// different ports on the same physical server.
+  List<CatalogListener> catalogListeners;
 
   /// hasAdmin reports whether enough is configured to attempt opening the
   /// users-admin tunnel for this server.
@@ -74,6 +90,9 @@ class ServerEntry {
     'adminSshPassword': adminSshPassword,
     'adminApiPort': adminApiPort,
     'adminToken': adminToken,
+    'catalogListeners': catalogListeners
+        .map((l) => {'transport': l.transport, 'port': l.port})
+        .toList(),
   };
 }
 
@@ -161,6 +180,26 @@ String _obfuscationModeToJson(ObfuscationMode m) {
       return 'shadowsocksAead';
     case ObfuscationMode.dnsOverTcp:
       return 'dnsOverTcp';
+  }
+}
+
+/// The `mode=` query-param value a catalog-built `chimera://` link needs for
+/// [mode] -- what `internal/subscription.Parse` reads into `carrier.Config
+/// .Transport` server-side (empty/absent means "auto", which picks Reality
+/// over plain TCP; see subscription.go). Shared by `_upsertCuratedServer`
+/// (bakes this in when a server is first picked) and
+/// [ChimeraSettings.applyObfuscationModeToCatalogServers] (rewrites it when
+/// the mode changes afterwards) so the two can never drift out of sync.
+String obfuscationModeQueryParam(ObfuscationMode m) {
+  switch (m) {
+    case ObfuscationMode.reality:
+      return '';
+    case ObfuscationMode.quicH3:
+      return 'quic';
+    case ObfuscationMode.shadowsocksAead:
+      return 'ss';
+    case ObfuscationMode.dnsOverTcp:
+      return 'dot';
   }
 }
 
@@ -284,13 +323,112 @@ class ChimeraSettings {
   /// `#!chimera-subscription-v1` document (one `chimera://` link per line,
   /// in list order) -- the format `internal/api.NewSessionFromSubscription`
   /// parses server-side. A single server is a valid one-line subscription.
-  String subscriptionText() {
+  ///
+  /// Catalog-picked entries (see `_upsertCuratedServer`) are saved without a
+  /// `tok=` or `sid=` param on purpose: `sid=` is per-device/per-account (a
+  /// catalog link describes a server, not a device -- see
+  /// AccountInfo.shortIdHex's doc comment), and `tok=` would go stale before
+  /// the token refreshes on its own ~24h TTL. So [token] and [shortIdHex] --
+  /// live values read from AccountStore at connect time, same as
+  /// `main.dart`'s `_effectiveSid` does for the real engage call -- are
+  /// stitched onto those links here. Without *both*, the reachability check
+  /// this text feeds (`chimeramobile.Tunnel.Connect` / `api.Session.Connect`)
+  /// either sends no token, or embeds the wrong (empty) short ID into the
+  /// Reality handshake (see `carrier.transport_reality.go`'s ClientWrap) --
+  /// either way a -auth-mode controlplane server's checkToken can't verify
+  /// it and closes the connection, surfacing as "unexpected EOF" on every
+  /// endpoint.
+  String subscriptionText({String? token, String? shortIdHex}) {
     final buf = StringBuffer('#!chimera-subscription-v1\n');
     for (final s in servers) {
-      buf.writeln(s.link);
+      buf.writeln(_linkWithAccountParams(s, token, shortIdHex));
     }
     return buf.toString();
   }
+
+  String _linkWithAccountParams(ServerEntry s, String? token, String? shortIdHex) {
+    if (!s.id.startsWith('catalog-')) return s.link;
+    final uri = Uri.parse(s.link);
+    final params = Map<String, String>.from(uri.queryParameters);
+    var changed = false;
+    if ((token ?? '').isNotEmpty && (params['tok'] ?? '').isEmpty) {
+      params['tok'] = token!;
+      changed = true;
+    }
+    if ((shortIdHex ?? '').isNotEmpty && (params['sid'] ?? '').isEmpty) {
+      params['sid'] = shortIdHex!;
+      changed = true;
+    }
+    if (!changed) return s.link;
+    return uri.replace(queryParameters: params).toString();
+  }
+
+  /// Rewrites the `mode=` param -- and, when the server's catalog listeners
+  /// are known, the actual host **port** too -- on every already-saved
+  /// catalog server link to match [mode]. Keeps them in sync with a later
+  /// Anti-censorship change.
+  ///
+  /// `_upsertCuratedServer` only bakes the obfuscation mode into a server's
+  /// link once, at the moment it's picked in the catalog. Without this,
+  /// changing the global Anti-censorship setting afterwards updates
+  /// [obfuscationMode] but never touches the already-saved link, so
+  /// `_resolvePrimaryServer` (which parses that link's `mode=`/port at
+  /// connect time) keeps dialing with whatever transport was selected when
+  /// the server was first chosen -- the switch silently has no effect on
+  /// the next Connect. BYO/legacy (non-catalog) server links are left
+  /// alone: their `mode=`, if any, is an explicit per-server choice, not
+  /// the global default.
+  ///
+  /// A server's different transports can each listen on a *different port*
+  /// on the same physical box (ROADMAP2 §3/§4 multi-transport support --
+  /// see `ServerEntry.catalogListeners`/`CatalogListener`), so rewriting
+  /// `mode=` alone isn't enough once more than one transport is offered:
+  /// the port has to move too, or the client dials the right protocol on
+  /// the wrong port and gets silence/EOF exactly like before this field
+  /// existed. If a server's recorded listeners don't include [mode] at all
+  /// (it simply isn't deployed there), that entry is left completely
+  /// unchanged rather than pointed at a port that can't work -- "no false
+  /// promises" applies to what actually gets dialed, not just to the UI
+  /// copy on anticensorship_page.dart.
+  void applyObfuscationModeToCatalogServers(ObfuscationMode mode) {
+    final modeParam = obfuscationModeQueryParam(mode);
+    for (final s in servers) {
+      if (!s.id.startsWith('catalog-')) continue;
+      final uri = Uri.tryParse(s.link);
+      if (uri == null) continue;
+
+      int? newPort;
+      if (s.catalogListeners.isNotEmpty) {
+        newPort = _listenerPort(s.catalogListeners, modeParam);
+        if (newPort == null) continue;
+      }
+
+      final params = Map<String, String>.from(uri.queryParameters);
+      if (modeParam.isEmpty) {
+        params.remove('mode');
+      } else {
+        params['mode'] = modeParam;
+      }
+      s.link = (newPort == null
+              ? uri.replace(queryParameters: params)
+              : uri.replace(port: newPort, queryParameters: params))
+          .toString();
+    }
+  }
+}
+
+/// The port [listeners] offers for [transportParam] (an
+/// `obfuscationModeQueryParam` value), or null if there's no listener for
+/// it at all. Mirrors `CatalogServer.portFor` in catalog_page.dart, kept as
+/// a free function here so `ChimeraSettings` doesn't need a `CatalogServer`
+/// (only its already-extracted `CatalogListener`s survive into
+/// `ServerEntry`).
+int? _listenerPort(List<CatalogListener> listeners, String transportParam) {
+  final wanted = transportParam.isEmpty ? 'reality' : transportParam;
+  for (final l in listeners) {
+    if (l.transport == wanted) return l.port;
+  }
+  return null;
 }
 
 /// SettingsStore loads/saves [ChimeraSettings] as

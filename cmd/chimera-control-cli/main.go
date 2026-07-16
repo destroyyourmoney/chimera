@@ -6,9 +6,12 @@
 //
 //	chimera-control-cli account create -expires 2027-01-01T00:00:00Z -device-limit 5
 //	chimera-control-cli account revoke -number 7K2M-9PQR-4TZS-XW3H
+//	chimera-control-cli account remove-devices -number 7K2M-9PQR-4TZS-XW3H
 //	chimera-control-cli catalog add -host vps.example.com -port 443 -pubkey B64KEY -sni www.microsoft.com -country Sweden -city Stockholm
 //	chimera-control-cli catalog remove -id 3
 //	chimera-control-cli catalog list
+//	chimera-control-cli catalog add-listener -server-id 3 -transport quic -port 8443
+//	chimera-control-cli catalog remove-listener -server-id 3 -transport quic
 //	chimera-control-cli revoke -sid a1b2c3d4
 package main
 
@@ -139,7 +142,7 @@ func mustOK(body []byte, status int, err error) []byte {
 
 func accountCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke|remove-devices> ...")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -174,15 +177,33 @@ func accountCmd(args []string) {
 		}
 		mustOK(adminRequest("POST", "/v1/admin/accounts/revoke", map[string]any{"account_number": *number}))
 		fmt.Println("revoked")
+	case "remove-devices":
+		fs := flag.NewFlagSet("account remove-devices", flag.ExitOnError)
+		number := fs.String("number", "", "account number to clear devices from (required)")
+		fs.Parse(args[1:])
+		if *number == "" {
+			fmt.Fprintln(os.Stderr, "error: -number is required")
+			os.Exit(2)
+		}
+		body := mustOK(adminRequest("POST", "/v1/admin/accounts/devices/reset", map[string]any{"account_number": *number}))
+		var resp struct {
+			RemovedCount int      `json:"removed_count"`
+			ShortIDs     []string `json:"short_ids"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			fmt.Fprintln(os.Stderr, "error: unexpected response:", string(body))
+			os.Exit(1)
+		}
+		fmt.Printf("removed %d device(s), revoked short IDs: %v\n", resp.RemovedCount, resp.ShortIDs)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke|remove-devices> ...")
 		os.Exit(2)
 	}
 }
 
 func catalogCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli catalog <add|remove|list> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli catalog <add|remove|list|add-listener|remove-listener> ...")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -223,8 +244,33 @@ func catalogCmd(args []string) {
 		} else {
 			fmt.Println(string(body))
 		}
+	case "add-listener":
+		fs := flag.NewFlagSet("catalog add-listener", flag.ExitOnError)
+		serverID := fs.Int64("server-id", 0, "catalog server id (required)")
+		transport := fs.String("transport", "", "reality|quic|ss|dot (required)")
+		port := fs.Int("port", 0, "listener port (required)")
+		fs.Parse(args[1:])
+		if *serverID == 0 || *transport == "" || *port == 0 {
+			fmt.Fprintln(os.Stderr, "error: -server-id, -transport, -port are required")
+			os.Exit(2)
+		}
+		mustOK(adminRequest("POST", fmt.Sprintf("/v1/admin/servers/%d/listeners", *serverID), map[string]any{
+			"transport": *transport, "port": *port,
+		}))
+		fmt.Println("listener added")
+	case "remove-listener":
+		fs := flag.NewFlagSet("catalog remove-listener", flag.ExitOnError)
+		serverID := fs.Int64("server-id", 0, "catalog server id (required)")
+		transport := fs.String("transport", "", "reality|quic|ss|dot (required)")
+		fs.Parse(args[1:])
+		if *serverID == 0 || *transport == "" {
+			fmt.Fprintln(os.Stderr, "error: -server-id and -transport are required")
+			os.Exit(2)
+		}
+		mustOK(adminRequest("DELETE", fmt.Sprintf("/v1/admin/servers/%d/listeners/%s", *serverID, *transport), nil))
+		fmt.Println("listener removed")
 	default:
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli catalog <add|remove|list> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli catalog <add|remove|list|add-listener|remove-listener> ...")
 		os.Exit(2)
 	}
 }

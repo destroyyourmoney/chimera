@@ -340,11 +340,21 @@ class AccountStore {
     final dir = await getApplicationSupportDirectory();
     final f = File('${dir.path}/chimera_device_key');
     if (await f.exists()) {
-      return (await f.readAsString()).trim();
+      final existing = (await f.readAsString()).trim();
+      if (existing.isNotEmpty) return existing;
     }
+    // No key yet (fresh install) or the file is present but empty/corrupt
+    // (e.g. a previous write was interrupted) -- either way this is the
+    // one and only point a device is "born" from the server's point of
+    // view, so it must persist before this method returns. Uninstall wipes
+    // this file on purpose (scripts/windows-installer.iss's
+    // [UninstallDelete]), so an uninstall+reinstall -- not a plain
+    // logout/login -- is the expected way to make the server see a "new"
+    // device from the same PC.
+    await dir.create(recursive: true);
     final bytes = List<int>.generate(32, (_) => Random.secure().nextInt(256));
     final encoded = base64Encode(bytes);
-    await f.writeAsString(encoded);
+    await f.writeAsString(encoded, flush: true);
     return encoded;
   }
 }

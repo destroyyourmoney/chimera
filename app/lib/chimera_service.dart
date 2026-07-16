@@ -11,6 +11,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'chimera_bindings.dart';
 import 'network_protection.dart';
@@ -184,17 +185,7 @@ class TunnelService {
   }
 
   Future<String?> _connectOnce() async {
-    final newTunnelResult = _bindings.newTunnel(_lastSubscriptionText, _lastSignKeyHex);
-    final newTunnelEnv = jsonDecode(newTunnelResult) as Map<String, dynamic>;
-    final handleErr = newTunnelEnv['error'] as String? ?? '';
-    if (handleErr.isNotEmpty) {
-      _stateController.add(ChimeraState.disconnected(lastError: handleErr));
-      return handleErr;
-    }
-    final handle = (newTunnelEnv['handle'] as num).toInt();
-
-    final connectErr = _bindings.connect(handle);
-    _bindings.freeHandle(handle);
+    final connectErr = await _preflight(_lastSubscriptionText, _lastSignKeyHex);
     if (connectErr.isNotEmpty) {
       _stateController.add(ChimeraState.disconnected(lastError: connectErr));
       return connectErr;
@@ -218,6 +209,30 @@ class TunnelService {
 
     _startPolling();
     return null;
+  }
+
+  /// _preflight runs the newTunnel/connect/freeHandle reachability check
+  /// (see ChimeraNativeApi) and returns the connect error, or '' on success.
+  ///
+  /// `lib.lookupFunction` calls are synchronous, and `connect` blocks on a
+  /// real network round-trip (pingAny dialing every configured endpoint in
+  /// turn -- see internal/api.pingAny). Run on the real chimera.dll bindings
+  /// directly on the UI isolate, that freezes the whole Flutter engine for
+  /// the duration: window minimize/move, the tray's own click handling, and
+  /// even "Quit" (which awaits disconnect() behind the same isolate) all
+  /// stop responding until the native call returns. So for the real bindings
+  /// this hands the call to a fresh background isolate (which must reopen
+  /// chimera.dll itself -- DynamicLibrary handles don't cross isolates, only
+  /// the plain-int tunnel handle does). Fakes (tests, Android's no-op stub)
+  /// aren't isolate-sendable and are already instant, so they run inline.
+  Future<String> _preflight(String subscriptionText, String signKeyHex) {
+    final bindings = _bindings;
+    if (bindings is ChimeraBindings) {
+      return Isolate.run(
+        () => _runPreflight(ChimeraBindings.open(), subscriptionText, signKeyHex),
+      );
+    }
+    return Future.value(_runPreflight(bindings, subscriptionText, signKeyHex));
   }
 
   /// disconnect is the user-initiated stop: clears the reconnect intent so
@@ -275,4 +290,23 @@ class TunnelService {
     _reconnectTimer?.cancel();
     _stateController.close();
   }
+}
+
+/// Top-level so it can run inside the background isolate `_preflight` spawns
+/// for the real bindings (an `Isolate.run` closure must not capture `this`).
+/// Returns the connect error, or '' on success.
+String _runPreflight(
+  ChimeraNativeApi bindings,
+  String subscriptionText,
+  String signKeyHex,
+) {
+  final newTunnelResult = bindings.newTunnel(subscriptionText, signKeyHex);
+  final newTunnelEnv = jsonDecode(newTunnelResult) as Map<String, dynamic>;
+  final handleErr = newTunnelEnv['error'] as String? ?? '';
+  if (handleErr.isNotEmpty) return handleErr;
+  final handle = (newTunnelEnv['handle'] as num).toInt();
+
+  final connectErr = bindings.connect(handle);
+  bindings.freeHandle(handle);
+  return connectErr;
 }

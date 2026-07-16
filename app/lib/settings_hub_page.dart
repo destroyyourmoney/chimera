@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import 'app_info.dart';
 import 'app_info_page.dart';
+import 'chimera_service.dart';
 import 'settings_store.dart';
 import 'split_tunnel_page.dart';
 import 'support_page.dart';
@@ -26,6 +27,8 @@ class SettingsHubPage extends StatelessWidget {
     required this.onSetCustomDns,
     required this.buildDiagnosticsReport,
     required this.onDisconnectAndQuit,
+    this.state,
+    this.downSamples = const [],
   });
 
   final ChimeraSettings settings;
@@ -37,6 +40,11 @@ class SettingsHubPage extends StatelessWidget {
   final Future<void> Function(List<String> dns) onSetCustomDns;
   final String Function() buildDiagnosticsReport;
   final VoidCallback onDisconnectAndQuit;
+
+  /// Passed through to Support's live throughput/endpoint-health section
+  /// (moved off Home in the redesign -- see support_page.dart).
+  final ChimeraState? state;
+  final List<double> downSamples;
 
   String _networkProtectionLabel(NetworkProtectionMode m) {
     switch (m) {
@@ -122,8 +130,11 @@ class SettingsHubPage extends StatelessWidget {
                     title: 'Support',
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) =>
-                            SupportPage(buildReport: buildDiagnosticsReport),
+                        builder: (_) => SupportPage(
+                          buildReport: buildDiagnosticsReport,
+                          state: state,
+                          downSamples: downSamples,
+                        ),
                       ),
                     ),
                   ),

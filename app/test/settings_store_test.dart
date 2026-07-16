@@ -3,6 +3,7 @@
 // (getApplicationSupportDirectory via path_provider) isn't covered here --
 // it's a thin wrapper with no branching logic worth mocking a platform
 // channel for; the model logic below is where real bugs would hide.
+import 'package:chimera_tray/catalog_page.dart';
 import 'package:chimera_tray/settings_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -21,6 +22,29 @@ void main() {
       expect(decoded.id, 'a1');
       expect(decoded.label, '');
       expect(decoded.link, '');
+    });
+
+    test('fromJson defaults catalogListeners to empty when absent', () {
+      final decoded = ServerEntry.fromJson({'id': 'a1'});
+      expect(decoded.catalogListeners, isEmpty);
+    });
+
+    test('round-trips catalogListeners through JSON', () {
+      final entry = ServerEntry(
+        id: 'catalog-1',
+        label: 'Stockholm',
+        link: 'chimera://h:443',
+        catalogListeners: const [
+          CatalogListener(transport: 'reality', port: 443),
+          CatalogListener(transport: 'quic', port: 8443),
+        ],
+      );
+      final decoded = ServerEntry.fromJson(entry.toJson());
+      expect(decoded.catalogListeners.length, 2);
+      expect(decoded.catalogListeners[0].transport, 'reality');
+      expect(decoded.catalogListeners[0].port, 443);
+      expect(decoded.catalogListeners[1].transport, 'quic');
+      expect(decoded.catalogListeners[1].port, 8443);
     });
   });
 
@@ -151,6 +175,168 @@ void main() {
         ChimeraSettings.fromJson({'obfuscationMode': 'garbage'}).obfuscationMode,
         ObfuscationMode.reality,
       );
+    });
+  });
+
+  group('obfuscationModeQueryParam', () {
+    test('maps all 4 modes to the query-param value subscription.go expects', () {
+      expect(obfuscationModeQueryParam(ObfuscationMode.reality), '');
+      expect(obfuscationModeQueryParam(ObfuscationMode.quicH3), 'quic');
+      expect(obfuscationModeQueryParam(ObfuscationMode.shadowsocksAead), 'ss');
+      expect(obfuscationModeQueryParam(ObfuscationMode.dnsOverTcp), 'dot');
+    });
+  });
+
+  group('applyObfuscationModeToCatalogServers', () {
+    test('rewrites mode= on a catalog server link, preserving other params', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(
+            id: 'catalog-1',
+            label: 'Stockholm, Sweden',
+            link: 'chimera://185.100.157.232:443?pbk=abc&sni=example.com&fp=chrome#1',
+          ),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.shadowsocksAead);
+
+      final uri = Uri.parse(settings.servers.single.link);
+      expect(uri.queryParameters['mode'], 'ss');
+      expect(uri.queryParameters['pbk'], 'abc');
+      expect(uri.queryParameters['sni'], 'example.com');
+      expect(uri.queryParameters['fp'], 'chrome');
+    });
+
+    test('switching to Reality removes the mode= param entirely (matches _upsertCuratedServer)', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(
+            id: 'catalog-1',
+            label: 'Stockholm, Sweden',
+            link: 'chimera://185.100.157.232:443?pbk=abc&mode=quic',
+          ),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.reality);
+
+      final uri = Uri.parse(settings.servers.single.link);
+      expect(uri.queryParameters.containsKey('mode'), isFalse);
+    });
+
+    test('leaves non-catalog (BYO/legacy) server links untouched', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(id: 'byo-1', label: 'My server', link: 'chimera://host:443?pbk=x&mode=quic'),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.shadowsocksAead);
+
+      expect(settings.servers.single.link, 'chimera://host:443?pbk=x&mode=quic');
+    });
+
+    test('updates every saved catalog server, not just the first', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(id: 'catalog-1', label: 'a', link: 'chimera://a:443?pbk=x'),
+          ServerEntry(id: 'catalog-2', label: 'b', link: 'chimera://b:443?pbk=y'),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.dnsOverTcp);
+
+      for (final s in settings.servers) {
+        expect(Uri.parse(s.link).queryParameters['mode'], 'dot');
+      }
+    });
+  });
+
+  group('applyObfuscationModeToCatalogServers with catalogListeners (per-transport ports)', () {
+    test('rewrites both mode= and the port to the target transport\'s own listener port', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(
+            id: 'catalog-1',
+            label: 'Stockholm, Sweden',
+            link: 'chimera://185.100.157.232:443?pbk=abc&sni=example.com',
+            catalogListeners: const [
+              CatalogListener(transport: 'reality', port: 443),
+              CatalogListener(transport: 'quic', port: 8443),
+              CatalogListener(transport: 'ss', port: 8444),
+              CatalogListener(transport: 'dot', port: 8445),
+            ],
+          ),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.shadowsocksAead);
+
+      final uri = Uri.parse(settings.servers.single.link);
+      expect(uri.port, 8444);
+      expect(uri.queryParameters['mode'], 'ss');
+      expect(uri.queryParameters['pbk'], 'abc');
+      expect(uri.host, '185.100.157.232');
+    });
+
+    test('switching back to Reality restores the reality listener\'s port and drops mode=', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(
+            id: 'catalog-1',
+            label: 'a',
+            link: 'chimera://h:8443?pbk=x&mode=quic',
+            catalogListeners: const [
+              CatalogListener(transport: 'reality', port: 443),
+              CatalogListener(transport: 'quic', port: 8443),
+            ],
+          ),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.reality);
+
+      final uri = Uri.parse(settings.servers.single.link);
+      expect(uri.port, 443);
+      expect(uri.queryParameters.containsKey('mode'), isFalse);
+    });
+
+    test('leaves a server unchanged entirely when it has no listener for the target transport', () {
+      final original = 'chimera://h:443?pbk=x';
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(
+            id: 'catalog-1',
+            label: 'a',
+            link: original,
+            catalogListeners: const [CatalogListener(transport: 'reality', port: 443)],
+          ),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.quicH3);
+
+      // Not switched to a port that can't work -- link is byte-for-byte
+      // untouched, still dialing the one transport this server actually has.
+      expect(settings.servers.single.link, original);
+    });
+
+    test('falls back to mode-only rewrite (legacy behavior) when catalogListeners is empty', () {
+      final settings = ChimeraSettings(
+        servers: [
+          ServerEntry(id: 'catalog-1', label: 'a', link: 'chimera://h:443?pbk=x'),
+        ],
+      );
+
+      settings.applyObfuscationModeToCatalogServers(ObfuscationMode.quicH3);
+
+      final uri = Uri.parse(settings.servers.single.link);
+      // No listener info recorded (e.g. an older catalog fetch) -- port is
+      // left alone, only mode= is best-effort updated as before this field
+      // existed.
+      expect(uri.port, 443);
+      expect(uri.queryParameters['mode'], 'quic');
     });
   });
 

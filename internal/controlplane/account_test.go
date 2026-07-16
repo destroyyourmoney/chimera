@@ -199,6 +199,73 @@ func TestAccountInfoByShortID(t *testing.T) {
 	}
 }
 
+func TestRemoveAllDevices(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAccountStore(db)
+	number, err := store.CreateAccount(time.Now().Add(24*time.Hour), 2)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	res1, err := store.Redeem(number, "device-1")
+	if err != nil {
+		t.Fatalf("Redeem device-1: %v", err)
+	}
+	res2, err := store.Redeem(number, "device-2")
+	if err != nil {
+		t.Fatalf("Redeem device-2: %v", err)
+	}
+
+	shortIDs, err := store.RemoveAllDevices(number)
+	if err != nil {
+		t.Fatalf("RemoveAllDevices: %v", err)
+	}
+	if len(shortIDs) != 2 {
+		t.Fatalf("expected 2 removed short IDs, got %+v", shortIDs)
+	}
+	got := map[string]bool{shortIDs[0]: true, shortIDs[1]: true}
+	if !got[res1.ShortIDHex] || !got[res2.ShortIDHex] {
+		t.Fatalf("removed short IDs %+v don't match redeemed %q/%q", shortIDs, res1.ShortIDHex, res2.ShortIDHex)
+	}
+
+	count, limit, err := store.DeviceCount(number)
+	if err != nil {
+		t.Fatalf("DeviceCount: %v", err)
+	}
+	if count != 0 || limit != 2 {
+		t.Fatalf("expected 0/2 after removal, got %d/%d", count, limit)
+	}
+
+	// The account itself must stay active/usable -- only its devices were
+	// cleared, unlike RevokeAccount.
+	if _, err := store.Redeem(number, "device-3"); err != nil {
+		t.Fatalf("expected the account to still accept a fresh redeem after RemoveAllDevices: %v", err)
+	}
+}
+
+func TestRemoveAllDevicesUnknownAccount(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAccountStore(db)
+	if _, err := store.RemoveAllDevices("0000-0000-0000-0000"); !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
+	}
+}
+
+func TestRemoveAllDevicesOnAccountWithNoDevices(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAccountStore(db)
+	number, err := store.CreateAccount(time.Now().Add(24*time.Hour), 5)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	shortIDs, err := store.RemoveAllDevices(number)
+	if err != nil {
+		t.Fatalf("RemoveAllDevices: %v", err)
+	}
+	if len(shortIDs) != 0 {
+		t.Fatalf("expected no devices removed, got %+v", shortIDs)
+	}
+}
+
 func TestDeviceCount(t *testing.T) {
 	db := newTestDB(t)
 	store := NewAccountStore(db)

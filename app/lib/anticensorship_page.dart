@@ -72,10 +72,22 @@ class AnticensorshipPage extends StatefulWidget {
     super.key,
     required this.current,
     required this.onChanged,
+    this.availableTransportParams,
   });
 
   final ObfuscationMode current;
   final Future<void> Function(ObfuscationMode mode) onChanged;
+
+  /// The `obfuscationModeQueryParam` values (`''` for Reality, else
+  /// `quic`/`ss`/`dot`) the currently selected server actually has a
+  /// listener for (ROADMAP2 §3/§4 multi-transport support -- see
+  /// `CatalogServer.availableTransportParams`). Null means "unknown /
+  /// no server selected yet, or a BYO link with no recorded listeners" --
+  /// every transport stays selectable rather than guessing. A non-null set
+  /// disables (dims, un-tappable) any card not in it: picking a transport
+  /// this server can't actually serve would just silently fail to connect,
+  /// which is exactly the false promise ROADMAP2 §0 rules out.
+  final Set<String>? availableTransportParams;
 
   @override
   State<AnticensorshipPage> createState() => _AnticensorshipPageState();
@@ -84,7 +96,14 @@ class AnticensorshipPage extends StatefulWidget {
 class _AnticensorshipPageState extends State<AnticensorshipPage> {
   late ObfuscationMode _selected = widget.current;
 
+  bool _isAvailable(ObfuscationMode mode) {
+    final available = widget.availableTransportParams;
+    if (available == null) return true;
+    return available.contains(obfuscationModeQueryParam(mode));
+  }
+
   Future<void> _select(ObfuscationMode mode) async {
+    if (!_isAvailable(mode)) return;
     setState(() => _selected = mode);
     await widget.onChanged(mode);
   }
@@ -110,63 +129,69 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
 
   Widget _transportCard(BuildContext context, ChimeraTokens tokens, _TransportSpec t) {
     final isSelected = _selected == t.mode;
+    final isAvailable = _isAvailable(t.mode);
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => _select(t.mode),
-        child: AnimatedContainer(
-          duration: ChimeraMotion.fast,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-          decoration: BoxDecoration(
-            color: isSelected ? tokens.accentSoft : tokens.surface2,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isSelected ? scheme.primary : Theme.of(context).dividerColor,
+    return Opacity(
+      opacity: isAvailable ? 1 : 0.45,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: isAvailable ? () => _select(t.mode) : null,
+          child: AnimatedContainer(
+            duration: ChimeraMotion.fast,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              color: isSelected ? tokens.accentSoft : tokens.surface2,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isSelected ? scheme.primary : Theme.of(context).dividerColor,
+              ),
             ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    t.name,
-                    style: TextStyle(
-                      fontFamily: 'Plex Sans',
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                      color: scheme.onSurface,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      t.name,
+                      style: TextStyle(
+                        fontFamily: 'Plex Sans',
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: scheme.onSurface,
+                      ),
                     ),
-                  ),
-                  Icon(
-                    isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
-                    size: 18,
-                    color: isSelected ? scheme.primary : tokens.textFaint,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                t.description,
-                style: TextStyle(
-                  fontFamily: 'Plex Sans',
-                  fontSize: 11.5,
-                  height: 1.5,
-                  color: tokens.textMuted,
+                    Icon(
+                      isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                      size: 18,
+                      color: isSelected ? scheme.primary : tokens.textFaint,
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(child: _meter(context, tokens, 'Speed', t.speedPct)),
-                  const SizedBox(width: 14),
-                  Expanded(child: _meter(context, tokens, 'Stealth', t.stealthPct)),
-                ],
-              ),
-            ],
+                const SizedBox(height: 6),
+                Text(
+                  isAvailable
+                      ? t.description
+                      : 'Not available on the currently selected server.',
+                  style: TextStyle(
+                    fontFamily: 'Plex Sans',
+                    fontSize: 11.5,
+                    height: 1.5,
+                    color: tokens.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(child: _meter(context, tokens, 'Speed', t.speedPct)),
+                    const SizedBox(width: 14),
+                    Expanded(child: _meter(context, tokens, 'Stealth', t.stealthPct)),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),

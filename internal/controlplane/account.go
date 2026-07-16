@@ -253,6 +253,49 @@ func (s *AccountStore) Refresh(shortIDHex string) (RedeemResult, error) {
 	return RedeemResult{Account: a, ShortIDHex: shortIDHex, AccountIDHash: accountIDHash}, nil
 }
 
+// RemoveAllDevices deletes every device row for the account identified by
+// number, freeing up all of its DeviceLimit slots -- e.g. an operator
+// clearing stale devices (a client bug that minted a new device key on
+// every launch instead of reusing one, or several lost/decommissioned
+// devices) without revoking the account itself, which `RevokeAccount`
+// already does and shouldn't be reused for this narrower case.
+//
+// Returns the short IDs that were removed so the caller can also push them
+// onto the instant-revocation list (see RevocationStore.Revoke): deleting
+// the device row alone does not invalidate an already-issued, still-
+// unexpired token for it -- that token only stops working once its short
+// ID is revoked or its TTL naturally elapses.
+func (s *AccountStore) RemoveAllDevices(number string) ([]string, error) {
+	acct, err := s.lookup(hashAccountNumber(number))
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`SELECT short_id_hex FROM devices WHERE account_id = ?`, acct.ID)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: list devices: %w", err)
+	}
+	var shortIDs []string
+	for rows.Next() {
+		var sid string
+		if err := rows.Scan(&sid); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("controlplane: scan device: %w", err)
+		}
+		shortIDs = append(shortIDs, sid)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if _, err := s.db.Exec(`DELETE FROM devices WHERE account_id = ?`, acct.ID); err != nil {
+		return nil, fmt.Errorf("controlplane: remove devices: %w", err)
+	}
+	return shortIDs, nil
+}
+
 // DeviceCount reports how many devices (out of DeviceLimit) an account has
 // provisioned -- used by account_page.dart's "2 / 5" display once wired to
 // the real API (currently mocked, see app/lib/account_store.dart).

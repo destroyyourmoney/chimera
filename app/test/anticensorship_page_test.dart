@@ -44,4 +44,58 @@ void main() {
     expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
     expect(find.byIcon(Icons.radio_button_off), findsNWidgets(3));
   });
+
+  group('availableTransportParams (ROADMAP2 §3/§4 multi-transport)', () {
+    testWidgets('null (unknown) keeps every transport tappable', (tester) async {
+      ObfuscationMode? changedTo;
+      await tester.pumpWidget(_wrap(AnticensorshipPage(
+        current: ObfuscationMode.reality,
+        onChanged: (mode) async => changedTo = mode,
+        availableTransportParams: null,
+      )));
+
+      await tester.tap(find.text('DNS-over-TCP'));
+      await tester.pumpAndSettle();
+      expect(changedTo, ObfuscationMode.dnsOverTcp);
+    });
+
+    testWidgets('tapping an unavailable transport does not call onChanged', (tester) async {
+      ObfuscationMode? changedTo;
+      await tester.pumpWidget(_wrap(AnticensorshipPage(
+        current: ObfuscationMode.reality,
+        onChanged: (mode) async => changedTo = mode,
+        availableTransportParams: const {''}, // this server only offers Reality
+      )));
+
+      await tester.tap(find.text('Shadowsocks-AEAD'));
+      await tester.pumpAndSettle();
+      expect(changedTo, isNull);
+    });
+
+    testWidgets('an unavailable transport shows the "not available" caption', (tester) async {
+      await tester.pumpWidget(_wrap(AnticensorshipPage(
+        current: ObfuscationMode.reality,
+        onChanged: (_) async {},
+        availableTransportParams: const {''},
+      )));
+
+      expect(
+        find.text('Not available on the currently selected server.'),
+        findsNWidgets(3), // quic, ss, dot -- reality itself is available
+      );
+    });
+
+    testWidgets('an available transport can still be tapped', (tester) async {
+      ObfuscationMode? changedTo;
+      await tester.pumpWidget(_wrap(AnticensorshipPage(
+        current: ObfuscationMode.reality,
+        onChanged: (mode) async => changedTo = mode,
+        availableTransportParams: const {'', 'quic'},
+      )));
+
+      await tester.tap(find.text('QUIC / H3'));
+      await tester.pumpAndSettle();
+      expect(changedTo, ObfuscationMode.quicH3);
+    });
+  });
 }

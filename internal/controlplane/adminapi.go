@@ -71,6 +71,39 @@ func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, re
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	mux.HandleFunc("POST /v1/admin/accounts/devices/reset", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AccountNumber string `json:"account_number"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		shortIDs, err := accounts.RemoveAllDevices(body.AccountNumber)
+		if err != nil {
+			if errors.Is(err, ErrAccountNotFound) {
+				writeErr(w, http.StatusNotFound, "no such account")
+				return
+			}
+			slog.Error("controlplane: remove devices failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "failed to remove devices")
+			return
+		}
+		// Deleting the device row alone leaves an already-issued token for it
+		// valid until its own TTL elapses -- push each freed short ID onto the
+		// instant-revocation list too so a removed device is actually cut off
+		// immediately, not just unable to redeem again.
+		for _, sid := range shortIDs {
+			if err := revocations.Revoke(sid); err != nil {
+				slog.Error("controlplane: revoke removed device failed", "short_id", sid, "err", err)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"removed_count": len(shortIDs),
+			"short_ids":     shortIDs,
+		})
+	})
+
 	mux.HandleFunc("GET /v1/admin/servers", func(w http.ResponseWriter, r *http.Request) {
 		servers, err := catalog.List()
 		if err != nil {
@@ -95,6 +128,46 @@ func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, re
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+	})
+
+	mux.HandleFunc("POST /v1/admin/servers/{id}/listeners", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		var body struct {
+			Transport string `json:"transport"`
+			Port      int    `json:"port"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if err := catalog.AddListener(id, body.Transport, body.Port); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("DELETE /v1/admin/servers/{id}/listeners/{transport}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		found, err := catalog.RemoveListener(id, r.PathValue("transport"))
+		if err != nil {
+			slog.Error("controlplane: remove listener failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "failed to remove listener")
+			return
+		}
+		if !found {
+			writeErr(w, http.StatusNotFound, "no such listener")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.HandleFunc("DELETE /v1/admin/servers/{id}", func(w http.ResponseWriter, r *http.Request) {
