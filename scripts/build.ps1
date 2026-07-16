@@ -25,7 +25,7 @@ if (-not $cmd) {
 New-Item -ItemType Directory -Force -Path "bin" | Out-Null
 $env:CGO_ENABLED = "0"
 
-$tags = "chimera_utls chimera_quic chimera_netstack"
+$tags = "chimera_utls chimera_quic chimera_netstack chimera_ss chimera_dot"
 & $Go build -buildvcs=false -tags $tags -o bin\chimera.exe .\cmd\chimera
 if ($LASTEXITCODE -ne 0) {
     throw "go build failed with exit code $LASTEXITCODE"

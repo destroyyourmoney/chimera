@@ -10,6 +10,7 @@
 // session, which is what used to leave the tray showing 0 B/s.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'chimera_bindings.dart';
 import 'network_protection.dart';
@@ -88,6 +89,7 @@ class PrimaryServer {
     this.sni = '',
     this.sid = '',
     this.transport = '',
+    this.token = '',
   });
 
   final String host;
@@ -103,16 +105,33 @@ class PrimaryServer {
   /// old SOCKS5 path used to.
   final String transport;
 
+  /// Control-plane capability token (ROADMAP2 §1), read live from
+  /// AccountStore at connect time (see main.dart's _resolvePrimaryServer)
+  /// rather than baked into the saved server entry -- the token refreshes
+  /// on its own ~24h TTL, so a value captured once at "Choose server" time
+  /// would go stale. Empty for -auth-mode useracl servers/legacy BYO links.
+  final String token;
+
   String get address => '$host:$port';
 }
 
 class TunnelService {
   /// bindings/controller are injectable so tests can exercise connect/
   /// disconnect/reconnect-watchdog logic against fakes instead of the real
-  /// chimera.dll and chimera-helper IPC.
+  /// chimera.dll and chimera-helper IPC. Defaults are platform-picked:
+  /// ChimeraBindings.open() throws on anything but Windows (no chimera.dll
+  /// there), so Android gets AndroidNoPreflightNativeApi (the reachability
+  /// check it would have done happens inside ChimeraVpnService.kt's
+  /// RealGoTunnel.start instead) paired with AndroidNetworkProtectionController.
   TunnelService({ChimeraNativeApi? bindings, NetworkProtectionController? controller})
-    : _bindings = bindings ?? ChimeraBindings.open(),
-      _controller = controller ?? DefaultNetworkProtectionController();
+    : _bindings =
+          bindings ??
+          (Platform.isAndroid ? const AndroidNoPreflightNativeApi() : ChimeraBindings.open()),
+      _controller =
+          controller ??
+          (Platform.isAndroid
+              ? AndroidNetworkProtectionController()
+              : DefaultNetworkProtectionController());
 
   final ChimeraNativeApi _bindings;
   final NetworkProtectionController _controller;
@@ -190,6 +209,7 @@ class TunnelService {
       sid: primary.sid,
       dns: _lastDns,
       transport: primary.transport,
+      token: primary.token,
     );
     if (!result.ok) {
       _stateController.add(ChimeraState.disconnected(lastError: result.error));

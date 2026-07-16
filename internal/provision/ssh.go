@@ -43,7 +43,7 @@ const (
 	defaultImage        = "chimera-server:latest"
 	defaultContainer    = "chimera-server"
 	defaultTransport    = "auto"
-	serverBuildTags     = "chimera_utls chimera_quic"
+	serverBuildTags     = "chimera_utls chimera_quic chimera_ss chimera_dot"
 	remoteDir           = "/opt/chimera"
 	dockerfilePath      = "docker/Dockerfile"
 

@@ -21,10 +21,14 @@
 //     non-tunnel interfaces only.
 //   - [NetworkProtectionMode.killswitch]: blocks ALL outbound traffic except
 //     the TUN device, loopback, and the resolved server endpoints.
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:flutter/services.dart';
 
 import 'nethelper_client.dart';
 import 'settings_store.dart';
+import 'vpn_backend.dart';
 
 class NetworkProtectionResult {
   const NetworkProtectionResult({required this.ok, this.error = ''});
@@ -46,6 +50,7 @@ abstract class NetworkProtectionController {
     String sid = '',
     List<String> dns = kDefaultCustomDns,
     String transport = '',
+    String token = '', // control-plane capability token, ROADMAP2 §1
   });
   Future<void> disengage();
 
@@ -67,6 +72,7 @@ class DefaultNetworkProtectionController implements NetworkProtectionController 
     String sid = '',
     List<String> dns = kDefaultCustomDns,
     String transport = '',
+    String token = '',
   }) => NetworkProtection.enable(
     mode: mode,
     server: server,
@@ -75,6 +81,7 @@ class DefaultNetworkProtectionController implements NetworkProtectionController 
     sid: sid,
     dns: dns,
     transport: transport,
+    token: token,
   );
 
   @override
@@ -84,6 +91,72 @@ class DefaultNetworkProtectionController implements NetworkProtectionController 
 
   @override
   Future<NetHelperResult> status() => NetworkProtection._helper.ping();
+}
+
+/// AndroidNetworkProtectionController is TunnelService's Android counterpart
+/// to [DefaultNetworkProtectionController]: engage/disengage delegate to
+/// [AndroidVpnServiceBackend] (the Kotlin ChimeraVpnService over
+/// MethodChannel), and status polls that same channel's "status" case
+/// (ChimeraVpnService.currentStatusJson, backed by chimeramobile.Tunnel's
+/// stateJSON) rather than chimera-helper's Windows-only ping. There's no
+/// CLI-elevation fallback tier here -- Android's VpnService consent prompt
+/// (handled in MainActivity.kt) is the only permission step, nothing like
+/// chimera-helper's install-once/UAC-once split applies.
+class AndroidNetworkProtectionController implements NetworkProtectionController {
+  static const _channel = MethodChannel('chimera/vpn');
+  final VpnBackend _backend = VpnBackend.forPlatform();
+
+  @override
+  Future<NetworkProtectionResult> engage({
+    required NetworkProtectionMode mode,
+    required String server,
+    required String pbk,
+    String sni = '',
+    String sid = '',
+    List<String> dns = kDefaultCustomDns,
+    String transport = '',
+    String token = '',
+  }) async {
+    final r = await _backend.start(
+      server: server,
+      pbk: pbk,
+      mode: mode == NetworkProtectionMode.killswitch ? 'killswitch' : 'dnsLeakGuard',
+      sni: sni,
+      sid: sid,
+      dns: dns,
+      transport: transport,
+      token: token,
+    );
+    return NetworkProtectionResult(ok: r.ok, error: r.error);
+  }
+
+  @override
+  Future<void> disengage() async {
+    await _backend.stop();
+  }
+
+  @override
+  Future<NetHelperResult> status() async {
+    try {
+      final raw = await _channel.invokeMethod<String>('status') ?? '{}';
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      // api.StateSnapshot's vocabulary ("connecting"/"connected"/
+      // "disconnected", see internal/api/api.go's State.String) differs from
+      // chimera-helper's own ("idle"/"running", internal/nethelper/protocol.go)
+      // -- NetHelperResult.isRunning checks for the literal string "running",
+      // so translate here rather than change that shared getter.
+      final apiState = json['state'] as String? ?? 'disconnected';
+      return NetHelperResult(
+        ok: true,
+        state: apiState == 'connected' ? 'running' : 'idle',
+        transport: json['transport'] as String? ?? '',
+        bytesUp: (json['bytesUp'] as num?)?.toInt() ?? 0,
+        bytesDown: (json['bytesDown'] as num?)?.toInt() ?? 0,
+      );
+    } on PlatformException catch (e) {
+      return NetHelperResult(ok: false, error: e.message ?? e.code);
+    }
+  }
 }
 
 class NetworkProtection {
@@ -171,11 +244,14 @@ class NetworkProtection {
     String dev = '',
     List<String> dns = kDefaultCustomDns,
     /// Anti-censorship transport: '', 'auto', 'quic', or 'tcp' -- matches
-    /// the per-server Mode a chimera:// link carries (see server_form.dart's
-    /// kTransportModes). Empty defers to chimera.exe tun's own "auto"
-    /// default. This is the TUN path's equivalent of Mullvad's obfuscation
-    /// method picker.
+    /// the per-server Mode a chimera:// link carries. Empty defers to
+    /// chimera.exe tun's own "auto" default. This is the TUN path's
+    /// equivalent of Mullvad's obfuscation method picker.
     String transport = '',
+    // Control-plane capability token (ROADMAP2 §1) -- forwarded to
+    // chimera.exe tun's own -token flag on both tiers below. Empty for
+    // -auth-mode useracl servers/legacy BYO links, which don't need one.
+    String token = '',
   }) async {
     if (await isHelperInstalled()) {
       final helperResult = await _helper.start(
@@ -188,6 +264,7 @@ class NetworkProtection {
         sid: sid,
         dns: dns,
         transport: transport,
+        token: token,
       );
       return NetworkProtectionResult(
         ok: helperResult.ok,
@@ -211,6 +288,7 @@ class NetworkProtection {
       if (dev.isNotEmpty) ...['-dev', dev],
       if (dns.isNotEmpty) ...['-dns', dns.join(',')],
       if (transport.isNotEmpty) ...['-transport', transport],
+      if (token.isNotEmpty) ...['-token', token],
     ];
     return _runCli(args);
   }

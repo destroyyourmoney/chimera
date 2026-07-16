@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,7 @@ import (
 	"chimera/internal/carrier"
 	"chimera/internal/client"
 	"chimera/internal/config"
+	"chimera/internal/controlplane"
 	"chimera/internal/endpoint"
 	"chimera/internal/healthreport"
 	"chimera/internal/keys"
@@ -152,13 +154,16 @@ func serverCmd(args []string) {
 	steal := fs.String("steal-host", "", "real TLS host to impersonate, host:port")
 	priv := fs.String("priv", "", "server private key, base64url")
 	sid := fs.String("sid", "", "allowed short IDs, comma-separated hex (empty = any)")
-	transport := fs.String("transport", "", "carrier transport: tcp|quic (default tcp)")
+	transport := fs.String("transport", "", "carrier transport: tcp|quic|ss|dot (default tcp)")
 	rate := fs.Float64("rate", 0, "per-IP auth attempts/sec (0 = use default)")
 	burst := fs.Float64("burst", 0, "per-IP auth burst (0 = use default)")
 	bw := fs.Float64("bw", 0, "QUIC ElasticCC Brutal target bandwidth in Mbps (0 = adaptive estimation)")
 	usersFile := fs.String("users-file", "", "path to a dynamic users YAML file (add/revoke sids without a restart via -admin-listen); overrides -sid/short_ids when set")
 	adminListen := fs.String("admin-listen", "", "address for the users admin HTTP API, e.g. 127.0.0.1:8901 (requires -users-file; empty = disabled)")
 	adminToken := fs.String("admin-token", "", "bearer token for -admin-listen (empty = generate one and print it once at startup)")
+	authMode := fs.String("auth-mode", "useracl", "authorization backend: useracl (legacy/BYO allow-list) | controlplane (ROADMAP2 §1, account-key model)")
+	cpPubKey := fs.String("controlplane-pubkey", "", "hex Ed25519 public key(s), comma-separated for rotation grace window (required for -auth-mode controlplane)")
+	cpAddr := fs.String("controlplane-addr", "", "control-plane base URL for polling revocations, e.g. https://control.example.com (required for -auth-mode controlplane)")
 	verbose := fs.Bool("v", false, "verbose (debug) logging")
 	_ = fs.Parse(args)
 
@@ -234,11 +239,29 @@ func serverCmd(args []string) {
 	defer stop()
 
 	var allowlist carrier.Allowlist
-	if *usersFile != "" {
-		allowlist = setupUserACL(ctx, *usersFile, *adminListen, *adminToken, cfg.ids)
+	var tokenVerifier carrier.TokenVerifier
+	switch *authMode {
+	case "controlplane":
+		if *usersFile != "" {
+			log.Fatal("server: -users-file is a useracl-mode option, not compatible with -auth-mode controlplane")
+		}
+		tokenVerifier = setupControlPlaneVerifier(ctx, *cpPubKey, *cpAddr)
+	case "useracl", "":
+		if *usersFile != "" {
+			allowlist = setupUserACL(ctx, *usersFile, *adminListen, *adminToken, cfg.ids)
+		}
+	default:
+		log.Fatalf("server: unknown -auth-mode %q (want useracl or controlplane)", *authMode)
 	}
 
 	if cfg.transport == "quic" || cfg.transport == "quic-rudp" {
+		if tokenVerifier != nil {
+			// QUIC parity for -auth-mode controlplane is a follow-up (Stage 1
+			// wired the TCP carrier first, see internal/server/server.go) --
+			// refusing to start silently in legacy mode would be worse than
+			// failing loudly here.
+			log.Fatal("server: -auth-mode controlplane is not yet supported on the QUIC transport")
+		}
 		// quic-rudp shares the QUIC carrier listener; it only adds a new command
 		// (CmdConnectRUDP) the server already handles, so the same serve path runs.
 		if carrier.QUICServe == nil {
@@ -251,11 +274,57 @@ func serverCmd(args []string) {
 		}))
 		return
 	}
+	if cfg.transport == "ss" {
+		if carrier.SSServe == nil {
+			log.Fatal("shadowsocks-aead transport requested but binary built without support (rebuild with -tags chimera_ss)")
+		}
+		must(carrier.SSServe(ctx, carrier.SSServerConfig{
+			Listen: cfg.listen, PrivB64: cfg.priv, ShortIDs: cfg.ids,
+			AuthRate: cfg.rate, AuthBurst: cfg.burst,
+			Allowlist:     allowlist,
+			TokenVerifier: tokenVerifier,
+		}))
+		return
+	}
+	if cfg.transport == "dot" {
+		if carrier.DoTServe == nil {
+			log.Fatal("dns-over-tcp transport requested but binary built without support (rebuild with -tags chimera_dot)")
+		}
+		must(carrier.DoTServe(ctx, carrier.DoTServerConfig{
+			Listen: cfg.listen, PrivB64: cfg.priv, SNI: cfg.steal, ShortIDs: cfg.ids,
+			AuthRate: cfg.rate, AuthBurst: cfg.burst,
+			Allowlist:     allowlist,
+			TokenVerifier: tokenVerifier,
+		}))
+		return
+	}
 	must(server.Run(ctx, server.Config{
 		Listen: cfg.listen, StealHost: cfg.steal, PrivB64: cfg.priv, ShortIDs: cfg.ids,
 		AuthRate: cfg.rate, AuthBurst: cfg.burst,
-		Allowlist: allowlist,
+		Allowlist:     allowlist,
+		TokenVerifier: tokenVerifier,
 	}))
+}
+
+// setupControlPlaneVerifier builds the -auth-mode controlplane
+// carrier.TokenVerifier: parses the (possibly comma-separated, for a
+// rotation grace window) public key list and starts the background
+// revocation poller (ROADMAP2 §1.3/§1.4).
+func setupControlPlaneVerifier(ctx context.Context, pubKeyHex, cpAddr string) carrier.TokenVerifier {
+	if pubKeyHex == "" || cpAddr == "" {
+		log.Fatal("server: -auth-mode controlplane requires -controlplane-pubkey and -controlplane-addr")
+	}
+	var pubKeys []ed25519.PublicKey
+	for _, k := range strings.Split(pubKeyHex, ",") {
+		pub, err := controlplane.ParsePublicKeyHex(strings.TrimSpace(k))
+		if err != nil {
+			log.Fatalf("server: -controlplane-pubkey: %v", err)
+		}
+		pubKeys = append(pubKeys, pub)
+	}
+	verifier := controlplane.NewServerVerifier(pubKeys, cpAddr)
+	go verifier.Watch(ctx.Done())
+	return verifier
 }
 
 // setupUserACL loads the dynamic users file, seeds it from the legacy -sid
@@ -318,11 +387,12 @@ func proxyCmd(args []string) {
 	listen := fs.String("listen", "127.0.0.1:1080", "local SOCKS5 listen address")
 	sni := fs.String("sni", "www.microsoft.com", "steal-host SNI")
 	sid := fs.String("sid", "", "short ID (hex)")
-	transport := fs.String("transport", "auto", "carrier transport: auto|tcp|quic (auto races QUIC+TCP; quic needs -tags chimera_quic)")
+	transport := fs.String("transport", "auto", "carrier transport: auto|tcp|quic|ss|dot (auto races QUIC+TCP; quic needs -tags chimera_quic, ss needs -tags chimera_ss, dot needs -tags chimera_dot)")
 	fp := fs.String("fp", "", "TLS fingerprint: chrome (default), chrome131, chrome120, firefox, safari, ios, edge")
 	provCmd := fs.String("provision-cmd", "", "shell command that prints a chimera subscription to provision fresh endpoints when the pool burns (auto-rotation)")
 	bw := fs.Float64("bw", 0, "QUIC ElasticCC Brutal target bandwidth in Mbps (0 = adaptive estimation)")
 	shape := fs.Bool("shape", false, "shape bulk QUIC writes into H3-video bursts (stealth; caps throughput)")
+	token := fs.String("token", "", "control-plane capability token (ROADMAP2 §1; required when the server(s) run -auth-mode controlplane)")
 	verbose := fs.Bool("v", false, "verbose (debug) logging")
 	_ = fs.Parse(args)
 	if *subFile == "" && (*srv == "" || *pbk == "") {
@@ -366,6 +436,14 @@ func proxyCmd(args []string) {
 	if len(cfgs) == 0 {
 		fs.Usage()
 		os.Exit(2)
+	}
+	if *token != "" {
+		// One capability token authorizes the whole curated fleet (ROADMAP2
+		// §1), so it applies uniformly across every pooled endpoint here,
+		// whether it came from -sub or -server/-pbk.
+		for i := range cfgs {
+			cfgs[i].Token = *token
+		}
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -485,11 +563,12 @@ func tunCmd(args []string) {
 	pbk := fs.String("pbk", "", "server public key, base64url")
 	sni := fs.String("sni", "www.microsoft.com", "steal-host SNI")
 	sid := fs.String("sid", "", "short ID (hex)")
-	transport := fs.String("transport", "auto", "carrier transport: auto|tcp|quic")
+	transport := fs.String("transport", "auto", "carrier transport: auto|tcp|quic|ss|dot")
 	dev := fs.String("dev", "", "TUN device name (empty = OS-assigned, e.g. utunN)")
 	mtu := fs.Int("mtu", 1400, "TUN MTU")
 	fp := fs.String("fp", "", "TLS fingerprint: chrome (default), firefox, safari, ios, edge")
 	bw := fs.Float64("bw", 0, "QUIC ElasticCC Brutal target bandwidth in Mbps (0 = adaptive estimation)")
+	token := fs.String("token", "", "control-plane capability token (ROADMAP2 §1; required when the server(s) run -auth-mode controlplane)")
 	setupOS := fs.Bool("setup-os", false, "configure OS full-tunnel routes/DNS for the TUN device (Windows; requires admin)")
 	setupDryRun := fs.Bool("setup-dry-run", false, "print the OS setup plan and exit without creating the TUN device")
 	setupElevate := fs.Bool("setup-elevate", false, "re-run this tun command through the Windows UAC prompt")
@@ -545,7 +624,7 @@ func tunCmd(args []string) {
 		if host == "" {
 			continue
 		}
-		cfgs = append(cfgs, carrier.Config{Server: host, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport, Fp: *fp, BandwidthBps: uint64(*bw * 125000)})
+		cfgs = append(cfgs, carrier.Config{Server: host, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport, Fp: *fp, BandwidthBps: uint64(*bw * 125000), Token: *token})
 	}
 	if len(cfgs) == 0 {
 		fs.Usage()
@@ -605,7 +684,8 @@ func healthCmd(args []string) {
 	pbk := fs.String("pbk", "", "server public key, base64url (required)")
 	sni := fs.String("sni", "www.microsoft.com", "steal-host SNI")
 	sid := fs.String("sid", "", "short ID (hex)")
-	transport := fs.String("transport", "tcp", "carrier transport to probe: tcp|quic")
+	transport := fs.String("transport", "tcp", "carrier transport to probe: tcp|quic|ss|dot")
+	token := fs.String("token", "", "control-plane capability token (ROADMAP2 §1; required if the server runs -auth-mode controlplane)")
 	asJSON := fs.Bool("json", false, "print machine-readable JSON instead of the table (for UI callers)")
 	_ = fs.Parse(args)
 	if *srv == "" || *pbk == "" {
@@ -621,7 +701,7 @@ func healthCmd(args []string) {
 	}
 
 	results := healthreport.Run(hosts, func(h string) error {
-		cfg := carrier.Config{Server: h, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport}
+		cfg := carrier.Config{Server: h, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport, Token: *token}
 		return carrier.Ping(cfg)
 	})
 
@@ -681,14 +761,15 @@ func clientCmd(args []string) {
 	pbk := fs.String("pbk", "", "server public key, base64url (required)")
 	sni := fs.String("sni", "www.microsoft.com", "steal-host SNI")
 	sid := fs.String("sid", "", "short ID (hex)")
-	transport := fs.String("transport", "tcp", "carrier transport: tcp|quic (quic needs -tags chimera_quic)")
+	transport := fs.String("transport", "tcp", "carrier transport: tcp|quic|ss|dot (quic needs -tags chimera_quic, ss needs -tags chimera_ss, dot needs -tags chimera_dot)")
 	fp := fs.String("fp", "", "TLS fingerprint: chrome (default), chrome131, chrome120, firefox, safari, ios, edge")
+	token := fs.String("token", "", "control-plane capability token (ROADMAP2 §1; required if the server runs -auth-mode controlplane)")
 	_ = fs.Parse(args)
 	if *srv == "" || *pbk == "" {
 		fs.Usage()
 		os.Exit(2)
 	}
-	must(client.Run(client.Config{Server: *srv, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport, Fp: *fp}))
+	must(client.Run(client.Config{Server: *srv, PubB64: *pbk, SNI: *sni, ShortIDHex: *sid, Transport: *transport, Fp: *fp, Token: *token}))
 }
 
 func must(err error) {

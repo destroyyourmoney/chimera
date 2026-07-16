@@ -85,6 +85,44 @@ abstract class ChimeraNativeApi {
   void freeHandle(int handle);
 }
 
+/// Android has no chimera.dll to preflight against -- [ChimeraBindings.open]
+/// throws on this platform. That preflight (newTunnel/connect/freeHandle in
+/// TunnelService._connectOnce, see chimera_service.dart) exists to verify
+/// reachability fast before engaging the real TUN device; on Android that
+/// same check already happens inside `chimeramobile.Tunnel.connect()`,
+/// called synchronously by ChimeraVpnService.kt's RealGoTunnel.start before
+/// it opens the tunnel. So this stub just reports success unconditionally
+/// and lets AndroidNetworkProtectionController.engage (network_protection.dart)
+/// do the real work end to end.
+class AndroidNoPreflightNativeApi implements ChimeraNativeApi {
+  const AndroidNoPreflightNativeApi();
+
+  @override
+  String newTunnel(String subscriptionText, String signKeyHex) => '{"handle":0,"error":""}';
+  @override
+  String newTunnelFromLink(String uri) => '{"handle":0,"error":""}';
+  @override
+  String connect(int handle) => '';
+  @override
+  String startFD(int handle, int fd, int mtu) => '';
+  @override
+  String startSocks(int handle, String listen) => '';
+  @override
+  void stop(int handle) {}
+  @override
+  String stateJSON(int handle) => '{}';
+  @override
+  String parseLink(String uri) => '{}';
+  @override
+  String deployServer(String specJson) =>
+      '{"error":"server deploy is CLI-operator only, not available on Android (ROADMAP2 §2)"}';
+  @override
+  String teardownServer(String specJson) =>
+      '{"error":"server teardown is CLI-operator only, not available on Android (ROADMAP2 §2)"}';
+  @override
+  void freeHandle(int handle) {}
+}
+
 /// ChimeraBindings loads chimera.dll (resolved relative to the running
 /// executable, same directory dart:ffi's DynamicLibrary.open searches by
 /// default on Windows) and exposes the exported C functions with Dart

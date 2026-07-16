@@ -4,7 +4,7 @@ param(
     [string]$Flutter,
     [string]$Iscc,
     [switch]$SkipInstaller,
-    [string]$Tags = "chimera_utls chimera_quic chimera_netstack"
+    [string]$Tags = "chimera_utls chimera_quic chimera_netstack chimera_ss chimera_dot"
 )
 
 # Builds the CHIMERA Windows tray app end to end:

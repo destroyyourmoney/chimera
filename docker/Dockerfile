@@ -5,7 +5,7 @@
 # against, not a recommendation. For an actual deployment, always pass the
 # same full tag set scripts/build.sh/build.ps1 use for a real binary:
 #
-#   docker build -f docker/Dockerfile --build-arg TAGS="chimera_utls chimera_quic" -t chimera:server .
+#   docker build -f docker/Dockerfile --build-arg TAGS="chimera_utls chimera_quic chimera_ss chimera_dot" -t chimera:server .
 #
 # Bench-only baseline (see docker/README.md):
 #

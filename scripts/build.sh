@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TAGS="chimera_utls chimera_quic chimera_netstack"
+TAGS="chimera_utls chimera_quic chimera_netstack chimera_ss chimera_dot"
 CGO_ENABLED=0 go build -buildvcs=false -tags "$TAGS" -o bin/chimera ./cmd/chimera
 
 echo "Built bin/chimera (tags: $TAGS)."

@@ -15,8 +15,10 @@
 # carrier is expected to hold goodput.
 #
 # Usage:
-#   docker/bench.sh                      # default build (TCP carrier), default loss sweep
+#   docker/bench.sh                              # default build (TCP carrier), default loss sweep
 #   TAG=chimera_quic MODE=quic docker/bench.sh   # build with QUIC carrier, run it
+#   TAG=chimera_ss MODE=ss docker/bench.sh       # Shadowsocks-AEAD carrier (ROADMAP2 §3)
+#   TAG=chimera_dot MODE=dot docker/bench.sh     # DNS-over-TCP carrier (ROADMAP2 §3)
 #   LOSS="0 30" SIZE_MB=10 docker/bench.sh       # custom sweep / object size
 #
 set -euo pipefail

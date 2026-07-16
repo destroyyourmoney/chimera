@@ -81,6 +81,7 @@ class FakeNetworkProtectionController implements NetworkProtectionController {
     String sid = '',
     List<String> dns = kDefaultCustomDns,
     String transport = '',
+    String token = '',
   }) async {
     engageCallCount++;
     if (engageError != null) {

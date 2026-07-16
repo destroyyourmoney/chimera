@@ -51,13 +51,7 @@ dependencies:
   local_notifier: ^0.1.6
   # Windows Registry / macOS LoginItems / Linux autostart entry (Phase F).
   launch_at_startup: ^0.5.1
-  # SSH client used only to open a local-forwarded tunnel to a managed
-  # server's loopback-only admin API (127.0.0.1:<admin-port>) -- the admin API
-  # is intentionally never exposed on the public interface (an extra open
-  # port would itself be a DPI-visible fingerprint the rest of this project
-  # goes out of its way to avoid), so the app reaches it the same way an
-  # operator would: `ssh -L`.
-  dartssh2: ^2.22.1
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:

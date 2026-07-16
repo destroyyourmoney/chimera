@@ -136,6 +136,36 @@ void main() {
     });
   });
 
+  group('ObfuscationMode', () {
+    test('round-trips all four values through JSON', () {
+      for (final mode in ObfuscationMode.values) {
+        final settings = ChimeraSettings(obfuscationMode: mode);
+        final decoded = ChimeraSettings.fromJson(settings.toJson());
+        expect(decoded.obfuscationMode, mode);
+      }
+    });
+
+    test('fromJson defaults to reality when absent or unrecognized', () {
+      expect(ChimeraSettings.fromJson({}).obfuscationMode, ObfuscationMode.reality);
+      expect(
+        ChimeraSettings.fromJson({'obfuscationMode': 'garbage'}).obfuscationMode,
+        ObfuscationMode.reality,
+      );
+    });
+  });
+
+  group('favoriteServerIds', () {
+    test('round-trips through JSON', () {
+      final settings = ChimeraSettings(favoriteServerIds: ['se-sto-1', 'nl-ams-1']);
+      final decoded = ChimeraSettings.fromJson(settings.toJson());
+      expect(decoded.favoriteServerIds, ['se-sto-1', 'nl-ams-1']);
+    });
+
+    test('defaults to empty when absent', () {
+      expect(ChimeraSettings.fromJson({}).favoriteServerIds, isEmpty);
+    });
+  });
+
   group('SplitTunnelSettings', () {
     test('fromJson treats any non-"include" mode string as exclude', () {
       final decoded = SplitTunnelSettings.fromJson({'mode': 'garbage'});

@@ -18,6 +18,9 @@ type Config struct {
 	ShortIDHex string
 	Transport  string
 	Fp         string
+	// Token is the control-plane capability token (ROADMAP2 §1), needed
+	// only against a server running -auth-mode controlplane.
+	Token string
 }
 
 // Run performs one handshake + PING and reports the result.
@@ -29,6 +32,7 @@ func Run(cfg Config) error {
 		ShortIDHex: cfg.ShortIDHex,
 		Transport:  cfg.Transport,
 		Fp:         cfg.Fp,
+		Token:      cfg.Token,
 	}
 	if err := carrier.Ping(c); err != nil {
 		return fmt.Errorf("carrier ping failed: %w", err)

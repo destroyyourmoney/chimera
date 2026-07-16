@@ -26,8 +26,15 @@ collapse and where the QUIC/ElasticCC carrier must hold up.
 # TCP-Reality baseline (default build):
 docker/bench.sh
 
-# QUIC carrier (once Stage 3 lands behind the build tag):
+# QUIC carrier:
 TAG=chimera_quic MODE=quic docker/bench.sh
+
+# Shadowsocks-AEAD carrier (ROADMAP2 §3 -- minimal overhead, no ClientHello):
+TAG=chimera_ss MODE=ss docker/bench.sh
+
+# DNS-over-TCP carrier (ROADMAP2 §3 -- slower, but blocking it breaks DNS
+# for the censor too):
+TAG=chimera_dot MODE=dot docker/bench.sh
 
 # Custom sweep / object size:
 LOSS="0 30" SIZE_MB=10 docker/bench.sh
@@ -52,5 +59,5 @@ a real server (not to benchmark), always pass the full tag set, the same one
 docker build -f docker/Dockerfile -t chimera:bench .
 
 # Real deployment — everything included, same tags as scripts/build.sh:
-docker build -f docker/Dockerfile --build-arg TAGS="chimera_utls chimera_quic" -t chimera:server .
+docker build -f docker/Dockerfile --build-arg TAGS="chimera_utls chimera_quic chimera_netstack chimera_ss chimera_dot" -t chimera:server .
 ```

@@ -119,6 +119,7 @@ func parse(r io.Reader, hmacKey []byte) ([]carrier.Config, error) {
 			ShortIDHex: p.Sid,
 			Transport:  p.Mode,
 			Fp:         p.Fp,
+			Token:      p.Token,
 		}
 		if cfg.Transport == "" {
 			cfg.Transport = "auto"

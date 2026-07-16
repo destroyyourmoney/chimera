@@ -357,6 +357,55 @@ final ThemeData chimeraLightTheme = _buildTheme(
   neutralPill: _lightNeutralPill,
 );
 
+/// Named motion tokens shared by every screen (ROADMAP2 §4): connect/
+/// disconnect crossfades, list filtering, and page transitions all read off
+/// these instead of ad-hoc literal durations, so pacing stays consistent
+/// (and changeable in one place) as new screens land.
+abstract final class ChimeraMotion {
+  /// Small state toggles: favorite star, transport radio selection.
+  static const fast = Duration(milliseconds: 120);
+
+  /// Default: connect/disconnect crossfade, status card recolor.
+  static const standard = Duration(milliseconds: 220);
+
+  /// Page-level transitions (catalog <-> home, entry -> home).
+  static const emphasized = Duration(milliseconds: 320);
+
+  static const standardCurve = Curves.easeOutCubic;
+  static const emphasizedCurve = Curves.easeOutCubic;
+}
+
+/// Custom page transition sharing [ChimeraMotion.emphasized]'s duration/curve
+/// -- a subtle fade + slide-up instead of Material's default platform
+/// transition, used for the account-key gate and catalog/anticensorship
+/// pushes so those flows feel like part of one system rather than default
+/// MaterialPageRoute chrome.
+class ChimeraPageRoute<T> extends PageRouteBuilder<T> {
+  ChimeraPageRoute({required WidgetBuilder builder})
+    : super(
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            builder(context),
+        transitionDuration: ChimeraMotion.emphasized,
+        reverseTransitionDuration: ChimeraMotion.emphasized,
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: ChimeraMotion.emphasizedCurve,
+          );
+          return FadeTransition(
+            opacity: curved,
+            child: SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0, 0.04),
+                end: Offset.zero,
+              ).animate(curved),
+              child: child,
+            ),
+          );
+        },
+      );
+}
+
 /// Monospace text style for protocol/measurement data (hosts, ports,
 /// throughput, RTT, transport labels) -- see design system split between
 /// Plex Sans (UI chrome) and Plex Mono (data).

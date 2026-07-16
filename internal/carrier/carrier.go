@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"chimera/internal/auth"
+	"chimera/internal/tunnel"
 )
 
 // Allowlist decides whether a short ID may authenticate. Implementations must
@@ -58,6 +59,22 @@ func AllowlistOrAny(allowed Allowlist, sid []byte) bool {
 	return allowed.Allowed(sid)
 }
 
+// TokenVerifier is the controlplane-backed counterpart to Allowlist
+// (ROADMAP2 §1): instead of checking a short ID against a locally-pushed
+// list, it checks a capability token the client presents against the
+// control-plane's public signing key plus a locally-cached, periodically
+// polled revocation list — no per-connection network call or disk read.
+// A server picks Allowlist (legacy/BYO, -auth-mode useracl) or
+// TokenVerifier (-auth-mode controlplane) at startup, never both; see
+// internal/server.Config.
+type TokenVerifier interface {
+	// VerifyToken reports whether token is validly signed, unexpired, not
+	// revoked, and was issued for shortIDHex specifically (a token can't be
+	// replayed under a different short ID recovered from a different
+	// handshake).
+	VerifyToken(token string, shortIDHex string) bool
+}
+
 // Config describes how to reach a CHIMERA server (normally from a chimera:// link).
 type Config struct {
 	Server       string // host:port
@@ -68,6 +85,11 @@ type Config struct {
 	Shaping      bool   // enable H3-video traffic shaping on the write path (QUIC only)
 	Fp           string // browser fingerprint/profile name: TCP uTLS and QUIC Chrome-H3 selector
 	BandwidthBps uint64 // QUIC ElasticCC Brutal fixed-rate target (bytes/s); 0 = adaptive
+	// Token is the control-plane capability token (ROADMAP2 §1) to present
+	// after the handshake when dialing a server running -auth-mode
+	// controlplane. Empty for legacy (-auth-mode useracl) servers, which
+	// never expect the CmdAuthToken frame at all.
+	Token string
 }
 
 // QUICServerConfig configures the QUIC carrier server. It is defined here (rather
@@ -115,6 +137,57 @@ var (
 	QUICDialUDP         func(cfg Config) (UDPCarrier, error)
 )
 
+// SSServerConfig configures the Shadowsocks-AEAD carrier server (ROADMAP2
+// §3). Defined here (rather than in transport_shadowsocks.go) so it exists
+// regardless of the chimera_ss build tag, same reason QUICServerConfig
+// lives here instead of internal/quic -- callers can reference the type
+// without importing quic-go/an SS implementation.
+type SSServerConfig struct {
+	Listen        string
+	PrivB64       string
+	ShortIDs      []string
+	Allowlist     Allowlist
+	TokenVerifier TokenVerifier
+	AuthRate      float64
+	AuthBurst     float64
+}
+
+// Shadowsocks-AEAD carrier registry (ROADMAP2 §3), populated by
+// internal/carrier/transport_shadowsocks.go's init() when built with
+// -tags chimera_ss; nil otherwise, same "graceful degrade to a clear
+// error" contract as the QUIC registry above.
+var (
+	SSDialConnect func(cfg Config, host string, port uint16) (net.Conn, error)
+	SSPing        func(cfg Config) error
+	SSServe       func(ctx context.Context, cfg SSServerConfig) error
+)
+
+var errNoSS = errors.New("carrier: built without Shadowsocks-AEAD support (rebuild with -tags chimera_ss)")
+
+// DoTServerConfig configures the DNS-over-TCP carrier server (ROADMAP2 §3).
+// SNI doubles as the DNS query name the disguised traffic uses.
+type DoTServerConfig struct {
+	Listen        string
+	PrivB64       string
+	SNI           string
+	ShortIDs      []string
+	Allowlist     Allowlist
+	TokenVerifier TokenVerifier
+	AuthRate      float64
+	AuthBurst     float64
+}
+
+// DNS-over-TCP carrier registry (ROADMAP2 §3), populated by
+// internal/carrier/transport_dot.go's init() when built with -tags
+// chimera_dot; nil otherwise.
+var (
+	DoTDialConnect func(cfg Config, host string, port uint16) (net.Conn, error)
+	DoTPing        func(cfg Config) error
+	DoTServe       func(ctx context.Context, cfg DoTServerConfig) error
+)
+
+var errNoDoT = errors.New("carrier: built without DNS-over-TCP support (rebuild with -tags chimera_dot)")
+
 // FingerprintUpdater is registered by internal/reality (chimera_utls build) in
 // its init(). Callers (e.g. config.Watch callbacks) invoke it to change the
 // global uTLS fingerprint without restarting. No-op when nil (plain build).
@@ -149,11 +222,25 @@ func DialConnect(cfg Config, host string, port uint16) (net.Conn, error) {
 			return nil, errNoQUIC
 		}
 		return QUICDialConnectRUDP(cfg, host, port)
+	case "ss":
+		if SSDialConnect == nil {
+			return nil, errNoSS
+		}
+		return SSDialConnect(cfg, host, port)
+	case "dot":
+		if DoTDialConnect == nil {
+			return nil, errNoDoT
+		}
+		return DoTDialConnect(cfg, host, port)
 	case "auto":
 		return DialRace(cfg, host, port)
 	}
 	conn, sess, err := establish(cfg)
 	if err != nil {
+		return nil, err
+	}
+	if err := presentToken(conn, sess, cfg.Token); err != nil {
+		conn.Close()
 		return nil, err
 	}
 	if err := sess.WriteConnect(conn, host, port); err != nil {
@@ -170,6 +257,27 @@ func DialConnect(cfg Config, host string, port uint16) (net.Conn, error) {
 		return nil, errors.New("carrier: server refused CONNECT (upstream dial failed)")
 	}
 	return conn, nil
+}
+
+// presentToken sends cfg.Token (ROADMAP2 §1) and waits for the server's
+// accept/reject reply, when a token is configured at all -- a no-op
+// against a legacy (-auth-mode useracl) server or when the caller never
+// set cfg.Token, so this is fully backward compatible.
+func presentToken(conn net.Conn, sess *tunnel.Session, token string) error {
+	if token == "" {
+		return nil
+	}
+	if err := sess.WriteAuthToken(conn, token); err != nil {
+		return err
+	}
+	ok, err := sess.ReadStatus(conn)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("carrier: server rejected capability token")
+	}
+	return nil
 }
 
 // DialRace fires QUIC and TCP dials concurrently and returns the first successful
@@ -228,6 +336,16 @@ func Ping(cfg Config) error {
 			return errNoQUIC
 		}
 		return QUICPing(cfg)
+	case "ss":
+		if SSPing == nil {
+			return errNoSS
+		}
+		return SSPing(cfg)
+	case "dot":
+		if DoTPing == nil {
+			return errNoDoT
+		}
+		return DoTPing(cfg)
 	case "auto":
 		if QUICPing != nil {
 			quicCfg := cfg
@@ -245,6 +363,9 @@ func Ping(cfg Config) error {
 		return err
 	}
 	defer conn.Close()
+	if err := presentToken(conn, sess, cfg.Token); err != nil {
+		return err
+	}
 	if err := sess.WritePing(conn); err != nil {
 		return err
 	}

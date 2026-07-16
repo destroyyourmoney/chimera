@@ -93,6 +93,9 @@ func (r *procRunner) Start(req nethelper.Request) error {
 	if req.Transport != "" {
 		args = append(args, "-transport", req.Transport)
 	}
+	if req.CapabilityToken != "" {
+		args = append(args, "-token", req.CapabilityToken)
+	}
 	args = append(args, "-status-file", statusFilePath())
 
 	cmd := exec.Command(exe, args...)

@@ -132,6 +132,38 @@ String _networkProtectionModeToJson(NetworkProtectionMode m) {
 
 const kDefaultCustomDns = ['1.1.1.1', '8.8.8.8'];
 
+/// The 4 anti-censorship transports offered on `anticensorship_page.dart`
+/// (ROADMAP2 §3). This is the *global default* picker -- it replaces the old
+/// per-server "transport-mode" field as the primary UI, though that
+/// per-server field still wins if a saved `ServerEntry` sets one explicitly.
+enum ObfuscationMode { reality, quicH3, shadowsocksAead, dnsOverTcp }
+
+ObfuscationMode _obfuscationModeFromJson(String? v) {
+  switch (v) {
+    case 'quicH3':
+      return ObfuscationMode.quicH3;
+    case 'shadowsocksAead':
+      return ObfuscationMode.shadowsocksAead;
+    case 'dnsOverTcp':
+      return ObfuscationMode.dnsOverTcp;
+    default:
+      return ObfuscationMode.reality;
+  }
+}
+
+String _obfuscationModeToJson(ObfuscationMode m) {
+  switch (m) {
+    case ObfuscationMode.reality:
+      return 'reality';
+    case ObfuscationMode.quicH3:
+      return 'quicH3';
+    case ObfuscationMode.shadowsocksAead:
+      return 'shadowsocksAead';
+    case ObfuscationMode.dnsOverTcp:
+      return 'dnsOverTcp';
+  }
+}
+
 /// Persisted split-tunnel selection (docs/app/platform-features.md §2).
 /// This is the picker's state only -- on the desktop tray (TUN-less SOCKS5,
 /// see `main.dart` header comment) there is no OS-level enforcement yet, so
@@ -182,14 +214,18 @@ class ChimeraSettings {
     this.lastConnectedServerId,
     SplitTunnelSettings? splitTunnel,
     this.nethelperDeclined = false,
+    this.obfuscationMode = ObfuscationMode.reality,
+    List<String>? favoriteServerIds,
   }) : servers = servers ?? [],
        customDns = customDns ?? List.of(kDefaultCustomDns),
-       splitTunnel = splitTunnel ?? SplitTunnelSettings();
+       splitTunnel = splitTunnel ?? SplitTunnelSettings(),
+       favoriteServerIds = favoriteServerIds ?? [];
 
   factory ChimeraSettings.fromJson(Map<String, dynamic> json) {
     final rawServers = json['servers'] as List<dynamic>? ?? const [];
     final rawSplitTunnel = json['splitTunnel'] as Map<String, dynamic>?;
     final rawDns = json['customDns'] as List<dynamic>?;
+    final rawFavorites = json['favoriteServerIds'] as List<dynamic>?;
     return ChimeraSettings(
       servers: rawServers
           .map((e) => ServerEntry.fromJson(e as Map<String, dynamic>))
@@ -205,6 +241,10 @@ class ChimeraSettings {
           ? null
           : SplitTunnelSettings.fromJson(rawSplitTunnel),
       nethelperDeclined: json['nethelperDeclined'] as bool? ?? false,
+      obfuscationMode: _obfuscationModeFromJson(
+        json['obfuscationMode'] as String?,
+      ),
+      favoriteServerIds: rawFavorites?.map((e) => e as String).toList(),
     );
   }
 
@@ -215,6 +255,11 @@ class ChimeraSettings {
   List<String> customDns;
   String? lastConnectedServerId;
   SplitTunnelSettings splitTunnel;
+  ObfuscationMode obfuscationMode;
+
+  /// IDs (`CatalogServer.id`) starred on `catalog_page.dart`. Catalog-scoped,
+  /// not tied to any one saved BYO server.
+  final List<String> favoriteServerIds;
 
   /// Set once the user dismisses the "enable full VPN protection" onboarding
   /// prompt (see main.dart's _connect) without installing chimera-helper, so
@@ -231,6 +276,8 @@ class ChimeraSettings {
     'lastConnectedServerId': lastConnectedServerId,
     'splitTunnel': splitTunnel.toJson(),
     'nethelperDeclined': nethelperDeclined,
+    'obfuscationMode': _obfuscationModeToJson(obfuscationMode),
+    'favoriteServerIds': favoriteServerIds,
   };
 
   /// subscriptionText assembles all saved servers into one

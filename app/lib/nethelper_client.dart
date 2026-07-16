@@ -116,6 +116,7 @@ class NetHelperClient {
     String sid = '',
     List<String> dns = const [],
     String transport = '',
+    String token = '', // control-plane capability token, ROADMAP2 §1
   }) => _call({
     'cmd': 'start',
     'server': server,
@@ -125,6 +126,10 @@ class NetHelperClient {
     if (sid.isNotEmpty) 'sid': sid,
     if (dns.isNotEmpty) 'dns': dns,
     if (transport.isNotEmpty) 'transport': transport,
+    // 'capabilityToken', not 'token' -- that key is already taken by the
+    // chimera-helper shared secret _call adds below (see nethelper.Request's
+    // two distinct token fields).
+    if (token.isNotEmpty) 'capabilityToken': token,
   }, timeout: const Duration(seconds: 15));
 
   /// stop tears down the full-tunnel and restores normal OS routing. Always

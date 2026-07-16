@@ -33,6 +33,12 @@ const (
 	// FEC datagram transport (internal/rudp) over the QUIC DATAGRAM channel
 	// instead of a reliable QUIC stream. Same host/port framing as CmdConnect.
 	CmdConnectRUDP byte = 0x03
+	// CmdAuthToken carries a control-plane capability token (ROADMAP2 §1),
+	// sent once immediately after the handshake and answered with a single
+	// WriteStatus reply -- entirely orthogonal to CmdPing/CmdConnect/etc,
+	// used only when both sides run with -auth-mode controlplane. Legacy
+	// (-auth-mode useracl, the default) never sends or expects this frame.
+	CmdAuthToken byte = 0x04
 
 	StatusOK   byte = 0x01
 	StatusFail byte = 0x00
@@ -43,9 +49,10 @@ const (
 const AssocIDLen = 2
 
 var (
-	errHostTooLong = errors.New("tunnel: host longer than 255 bytes")
-	errBadCommand  = errors.New("tunnel: unknown command")
-	errShortFrame  = errors.New("tunnel: truncated control frame")
+	errHostTooLong  = errors.New("tunnel: host longer than 255 bytes")
+	errBadCommand   = errors.New("tunnel: unknown command")
+	errShortFrame   = errors.New("tunnel: truncated control frame")
+	errTokenTooLong = errors.New("tunnel: token longer than 65535 bytes")
 )
 
 // Session holds the two per-direction padding streams for one carrier.
@@ -97,6 +104,36 @@ func (s *Session) writeAddrCmd(w io.Writer, cmd byte, host string, port uint16) 
 	b = append(b, host...)
 	b = append(b, byte(port>>8), byte(port))
 	return padding.WriteFrame(w, s.send, b)
+}
+
+// WriteAuthToken sends a padded capability token (ROADMAP2 §1) -- the
+// controlplane-mode counterpart to the implicit "membership" a legacy
+// useracl allow-list check performs. Sent once, right after the handshake,
+// before any CmdPing/CmdConnect.
+func (s *Session) WriteAuthToken(w io.Writer, token string) error {
+	if len(token) > 0xFFFF {
+		return errTokenTooLong
+	}
+	b := make([]byte, 0, 3+len(token))
+	b = append(b, CmdAuthToken, byte(len(token)>>8), byte(len(token)))
+	b = append(b, token...)
+	return padding.WriteFrame(w, s.send, b)
+}
+
+// ReadAuthToken reads the token frame WriteAuthToken sends.
+func (s *Session) ReadAuthToken(r io.Reader) (token string, err error) {
+	payload, err := padding.ReadFrame(r, s.recv)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) < 3 || payload[0] != CmdAuthToken {
+		return "", errBadCommand
+	}
+	tokenLen := int(payload[1])<<8 | int(payload[2])
+	if len(payload) != 3+tokenLen {
+		return "", errShortFrame
+	}
+	return string(payload[3 : 3+tokenLen]), nil
 }
 
 // ReadRequest reads one padded inner request from the carrier.

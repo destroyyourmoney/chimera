@@ -51,6 +51,13 @@ type Request struct {
 	// chimera:// link's own Mode field, see internal/link.Profile.Mode).
 	// Empty defers to chimera.exe tun's own "auto" default.
 	Transport string `json:"transport,omitempty"`
+
+	// CapabilityToken is the control-plane capability token (ROADMAP2 §1) to
+	// forward to chimera.exe tun's own -token flag -- distinct from Token
+	// above, which authenticates the app to chimera-helper itself, not
+	// chimera-helper to the CHIMERA server. Empty for -auth-mode useracl
+	// servers/legacy BYO links, which never expect one.
+	CapabilityToken string `json:"capabilityToken,omitempty"`
 }
 
 // State values reported in Response.State.

@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ecdh"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net"
@@ -54,16 +55,23 @@ type Config struct {
 	// Allowlist, if set, overrides ShortIDs with a dynamic allow-list (e.g.
 	// internal/useracl.Store) so users can be added/revoked without a restart.
 	Allowlist carrier.Allowlist
+	// TokenVerifier, if set, switches the server into controlplane mode
+	// (ROADMAP2 §1, "-auth-mode controlplane"): Allowlist/ShortIDs are
+	// ignored, and every tunnel-mode connection must additionally present a
+	// valid capability token (see tunnel.Session.WriteAuthToken) before its
+	// first CmdPing/CmdConnect is served.
+	TokenVerifier carrier.TokenVerifier
 }
 
 // server is the per-process carrier state shared across connections.
 type server struct {
-	priv      *ecdh.PrivateKey
-	serverPub []byte
-	stealHost string
-	allowed   carrier.Allowlist
-	limiter   *ratelimit.Limiter
-	preconn   *preconnect.Pool // pre-warmed connections to steal-host
+	priv          *ecdh.PrivateKey
+	serverPub     []byte
+	stealHost     string
+	allowed       carrier.Allowlist
+	tokenVerifier carrier.TokenVerifier
+	limiter       *ratelimit.Limiter
+	preconn       *preconnect.Pool // pre-warmed connections to steal-host
 }
 
 // Run starts the listener and serves connections until ctx is cancelled, then
@@ -80,11 +88,12 @@ func Run(ctx context.Context, cfg Config) error {
 		rate, burst = DefaultAuthRate, DefaultAuthBurst
 	}
 	s := &server{
-		priv:      priv,
-		serverPub: priv.PublicKey().Bytes(),
-		stealHost: cfg.StealHost,
-		allowed:   allowed,
-		limiter:   ratelimit.New(rate, burst),
+		priv:          priv,
+		serverPub:     priv.PublicKey().Bytes(),
+		stealHost:     cfg.StealHost,
+		allowed:       allowed,
+		tokenVerifier: cfg.TokenVerifier,
+		limiter:       ratelimit.New(rate, burst),
 	}
 
 	ln, err := net.Listen("tcp", cfg.Listen)
@@ -108,11 +117,12 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 		rate, burst = DefaultAuthRate, DefaultAuthBurst
 	}
 	s := &server{
-		priv:      priv,
-		serverPub: priv.PublicKey().Bytes(),
-		stealHost: cfg.StealHost,
-		allowed:   allowed,
-		limiter:   ratelimit.New(rate, burst),
+		priv:          priv,
+		serverPub:     priv.PublicKey().Bytes(),
+		stealHost:     cfg.StealHost,
+		allowed:       allowed,
+		tokenVerifier: cfg.TokenVerifier,
+		limiter:       ratelimit.New(rate, burst),
 	}
 	return s.serve(ctx, ln)
 }
@@ -164,9 +174,9 @@ func (s *server) handle(c net.Conn) {
 	// Abuse limit: over the per-IP budget we skip the auth crypto entirely and
 	// fall through to the steal-host splice — wire-identical to any unauth peer,
 	// so this adds no probing oracle while bounding CPU-exhaustion floods.
-	var sharedSecret []byte
+	var sharedSecret, shortID []byte
 	if s.limiter.Allow(peerIP(c)) {
-		sharedSecret = s.authenticate(raw)
+		sharedSecret, shortID = s.authenticate(raw)
 	}
 
 	if sharedSecret != nil {
@@ -177,32 +187,62 @@ func (s *server) handle(c net.Conn) {
 			return
 		}
 		defer rw.Close()
-		serveTunnel(rw, tunnel.ServerSession(sharedSecret))
+		serveTunnel(rw, tunnel.ServerSession(sharedSecret), s.checkToken(shortID))
 		return
 	}
 	slog.Debug("no auth -> fallback", "peer", c.RemoteAddr().String(), "steal_host", s.stealHost)
 	spliceConn(c, br, raw, s.preconn)
 }
 
-// authenticate returns the shared secret for an authorized ClientHello, or nil.
-func (s *server) authenticate(raw []byte) []byte {
+// authenticate returns the shared secret and recovered short ID for a
+// cryptographically valid ClientHello, or (nil, nil). In legacy mode
+// (s.tokenVerifier == nil) it also enforces allow-list membership right
+// here, same as before; in controlplane mode that decision is deferred to
+// the post-handshake token exchange (see checkToken/serveTunnel) since
+// membership there depends on a token the client hasn't sent yet.
+func (s *server) authenticate(raw []byte) (sharedSecret, shortID []byte) {
 	sid, xpub, perr := clienthello.Parse(raw)
 	if perr != nil || len(xpub) != 32 || len(sid) < auth.TagLen {
-		return nil
+		return nil, nil
 	}
 	pub, kerr := ecdh.X25519().NewPublicKey(xpub)
 	if kerr != nil {
-		return nil
+		return nil, nil
 	}
 	ss, derr := s.priv.ECDH(pub)
 	if derr != nil {
+		return nil, nil
+	}
+	recovered, ok := auth.Open(ss, xpub, s.serverPub, sid[:auth.TagLen])
+	if !ok {
+		return nil, nil
+	}
+	if s.tokenVerifier == nil && !carrier.AllowlistOrAny(s.allowed, recovered) {
+		return nil, nil
+	}
+	return ss, recovered
+}
+
+// checkToken returns the per-connection token-verification closure
+// serveTunnel uses when running in controlplane mode, or nil in legacy
+// mode (membership was already decided in authenticate above).
+//
+// Caveat, documented rather than glossed over: unlike the primary crypto
+// gate (which falls through to an indistinguishable steal-host splice on
+// failure), a token that fails verification here just closes the
+// connection outright instead of splicing. By this point the peer has
+// already proven possession of a valid ephemeral key against this
+// server's real static key, so the marginal stealth value of also hiding
+// "wrong/expired/revoked token" behind a splice is low; tightening this
+// further is a follow-up, not a blocker for Stage 1.
+func (s *server) checkToken(shortID []byte) func(token string) bool {
+	if s.tokenVerifier == nil {
 		return nil
 	}
-	shortID, ok := auth.Open(ss, xpub, s.serverPub, sid[:auth.TagLen])
-	if !ok || !carrier.AllowlistOrAny(s.allowed, shortID) {
-		return nil
+	shortIDHex := hex.EncodeToString(shortID)
+	return func(token string) bool {
+		return s.tokenVerifier.VerifyToken(token, shortIDHex)
 	}
-	return ss
 }
 
 // peerIP extracts the source IP (without port) for rate-limit keying.
@@ -218,7 +258,21 @@ func peerIP(c net.Conn) string {
 // (default build) or a Reality-hijacked TLS session (chimera_utls build).
 // Vision-splicing: the relay payload is classified (TLS/plain) and relayed via
 // vision.Splice, which preserves any peeked bytes and logs the flow type.
-func serveTunnel(rw io.ReadWriteCloser, sess *tunnel.Session) {
+// verifyToken is nil in legacy (-auth-mode useracl) mode, where membership
+// was already decided in authenticate; when non-nil (-auth-mode
+// controlplane) the very first frame on the tunnel must be a capability
+// token that verifyToken accepts before any CmdPing/CmdConnect is served.
+func serveTunnel(rw io.ReadWriteCloser, sess *tunnel.Session, verifyToken func(token string) bool) {
+	if verifyToken != nil {
+		token, err := sess.ReadAuthToken(rw)
+		if err != nil {
+			return
+		}
+		ok := verifyToken(token)
+		if err := sess.WriteStatus(rw, ok); err != nil || !ok {
+			return
+		}
+	}
 	cmd, host, port, err := sess.ReadRequest(rw)
 	if err != nil {
 		return

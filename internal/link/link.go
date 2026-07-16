@@ -2,7 +2,7 @@
 // on VLESS-Reality links so it is familiar to operators and survives a clean
 // build → parse → build round trip:
 //
-//	chimera://<authID>@<host>:<port>?pbk=..&sid=..&sni=..&fp=..&mode=..#<tag>
+//	chimera://<authID>@<host>:<port>?pbk=..&sid=..&sni=..&fp=..&mode=..&tok=..#<tag>
 //
 // All transport-shaping parameters live in the query string; the human label is
 // the URL fragment. Empty optional fields are omitted so links stay compact.
@@ -28,6 +28,12 @@ type Profile struct {
 	Fp     string // fingerprint to mimic (e.g. chrome)
 	Mode   string // transport mode: auto|quic|tcp
 	Tag    string // human label
+	// Token is the control-plane capability token (ROADMAP2 §1), carried so
+	// a curated server's link is self-sufficient for -auth-mode
+	// controlplane servers -- the same token AccountStore holds after
+	// redeem/refresh. Empty for -auth-mode useracl servers/legacy BYO
+	// links, which don't need one.
+	Token string
 }
 
 // Build renders a Profile as a chimera:// URI.
@@ -38,6 +44,7 @@ func Build(p Profile) string {
 	setIf(q, "sni", p.Sni)
 	setIf(q, "fp", p.Fp)
 	setIf(q, "mode", p.Mode)
+	setIf(q, "tok", p.Token)
 
 	u := url.URL{
 		Scheme:   scheme,
@@ -71,6 +78,7 @@ func Parse(uri string) (Profile, error) {
 		Sni:    q.Get("sni"),
 		Fp:     q.Get("fp"),
 		Mode:   q.Get("mode"),
+		Token:  q.Get("tok"),
 		Tag:    u.Fragment,
 	}, nil
 }

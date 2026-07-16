@@ -10,7 +10,6 @@
 // (endpoint health, throughput) and let the user manage servers, network
 // protection, split tunneling, and autostart, or Disconnect & quit.
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -20,16 +19,77 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'account_entry_page.dart';
+import 'account_page.dart';
+import 'account_store.dart';
+import 'anticensorship_page.dart';
 import 'app_info.dart';
-import 'chimera_bindings.dart';
+import 'catalog_page.dart';
 import 'chimera_service.dart';
 import 'diagnostics.dart';
 import 'network_protection.dart';
-import 'servers_page.dart';
 import 'settings_hub_page.dart';
 import 'settings_store.dart';
 import 'speed_sparkline.dart';
 import 'theme.dart';
+
+/// Filesystem path to a bundled tray/window icon. tray_manager needs a real
+/// filesystem path, not a Flutter asset bundle key. Flutter always stages
+/// assets under data/flutter_assets next to the running executable (true for
+/// `flutter run` and for a packaged build alike) -- unlike a path relative to
+/// windows/runner/resources, which only exists in the source tree and is
+/// never copied into a build output, silently breaking the tray icon outside
+/// `flutter run`.
+String _iconAssetPath(String fileName) {
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+  return [
+    exeDir,
+    'data',
+    'flutter_assets',
+    'assets',
+    'icons',
+    fileName,
+  ].join(Platform.pathSeparator);
+}
+
+/// Owns the tray icon from the moment the app starts until `_HomePageState`
+/// hands it off (see `_HomePageState.initState`). Without this, the tray
+/// icon/menu only came into existence inside `_HomePageState._initTray()`
+/// -- which is only reached once `AccountGate` resolves to a signed-in
+/// user. On a fresh install (no saved account key yet), that point is never
+/// reached: the process stays alive with no tray icon and a window that's
+/// hidden by `main()` and never shown, i.e. running invisibly with no way
+/// for the user to interact with it at all.
+class _BootstrapTrayListener with TrayListener {
+  @override
+  void onTrayIconMouseDown() => _toggleVisibility();
+
+  @override
+  void onTrayIconRightMouseDown() => trayManager.popUpContextMenu();
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    switch (menuItem.key) {
+      case 'open':
+        windowManager.show();
+        windowManager.focus();
+        break;
+      case 'quit':
+        exit(0);
+    }
+  }
+
+  Future<void> _toggleVisibility() async {
+    if (await windowManager.isVisible()) {
+      await windowManager.hide();
+    } else {
+      await windowManager.show();
+      await windowManager.focus();
+    }
+  }
+}
+
+final _bootstrapTrayListener = _BootstrapTrayListener();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,6 +124,29 @@ Future<void> main() async {
     await windowManager.setAlwaysOnTop(true);
   });
 
+  // Get a tray icon on screen immediately, before AccountGate/HomePage have
+  // had a chance to load -- see _BootstrapTrayListener's doc comment.
+  // _HomePageState._initTray() overwrites the icon/tooltip/menu and takes
+  // the listener over once it mounts.
+  try {
+    await trayManager.setIcon(_iconAssetPath('app_icon_disconnected.ico'));
+    await trayManager.setToolTip('CHIMERA - starting…');
+    await trayManager.setContextMenu(
+      Menu(
+        items: [
+          MenuItem(key: 'open', label: 'Open'),
+          MenuItem.separator(),
+          MenuItem(key: 'quit', label: 'Quit'),
+        ],
+      ),
+    );
+    trayManager.addListener(_bootstrapTrayListener);
+  } catch (_) {
+    // Best-effort: if this fails (e.g. icon asset missing), fall through --
+    // _HomePageState._initTray() will retry once it mounts. Never block
+    // startup on tray setup.
+  }
+
   runApp(const ChimeraTrayApp());
 }
 
@@ -78,8 +161,59 @@ class ChimeraTrayApp extends StatelessWidget {
       theme: chimeraLightTheme,
       darkTheme: chimeraDarkTheme,
       themeMode: ThemeMode.system,
-      home: const HomePage(),
+      home: const AccountGate(),
     );
+  }
+}
+
+/// First widget shown on launch (ROADMAP2 §4): decides between the
+/// account-key entry screen and HomePage based on whether a still-valid
+/// local token exists (`AccountStore.hasValidToken` -- currently a local
+/// mock of the real control-plane redeem/refresh flow, see
+/// account_store.dart). Both branches clear the navigation stack down to
+/// themselves so logging in/out never leaves a stale screen behind it.
+class AccountGate extends StatefulWidget {
+  const AccountGate({super.key});
+
+  @override
+  State<AccountGate> createState() => _AccountGateState();
+}
+
+class _AccountGateState extends State<AccountGate> {
+  bool? _hasValidToken;
+
+  @override
+  void initState() {
+    super.initState();
+    AccountStore().hasValidToken().then((v) {
+      if (mounted) setState(() => _hasValidToken = v);
+      if (v == false) {
+        // No saved account key: there's no tray-driven flow that would ever
+        // lead the user to AccountEntryPage on its own (unlike HomePage,
+        // which the tray icon toggles), so show the window outright instead
+        // of leaving it hidden with nothing on screen to click.
+        windowManager.show();
+        windowManager.focus();
+      }
+    });
+  }
+
+  void _goHome(BuildContext context) {
+    Navigator.of(context).pushAndRemoveUntil(
+      ChimeraPageRoute(builder: (_) => const HomePage()),
+      (route) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_hasValidToken == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (_hasValidToken == false) {
+      return AccountEntryPage(onRedeemed: (_) async => _goHome(context));
+    }
+    return const HomePage();
   }
 }
 
@@ -96,7 +230,15 @@ class HomePage extends StatefulWidget {
 enum _TrayIcon { disconnected, connected, error }
 
 class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
-  final _service = TunnelService();
+  // Nullable + constructed inside initState (not a field initializer): a
+  // field initializer runs during State construction, before initState --
+  // if TunnelService() (which loads chimera.dll via ChimeraBindings.open())
+  // threw there, the whole widget tree would fail to build with nothing on
+  // screen to show it (window starts hidden, tray icon doesn't exist yet),
+  // leaving the process running invisibly. Constructing it in initState lets
+  // us catch that and surface a visible error instead.
+  TunnelService? _service;
+  String? _initError;
   final _store = SettingsStore();
   ChimeraSettings _settings = ChimeraSettings();
   ChimeraState _state = ChimeraState.disconnected();
@@ -116,9 +258,19 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   @override
   void initState() {
     super.initState();
+    // Hand the tray icon over from the app-startup bootstrap listener
+    // (main.dart's _bootstrapTrayListener) to this page's full
+    // Connect/Disconnect/Settings/Quit menu -- both must never be
+    // registered at once, or a single click would toggle the window twice.
+    trayManager.removeListener(_bootstrapTrayListener);
     trayManager.addListener(this);
     windowManager.addListener(this);
-    _stateSub = _service.stateUpdates.listen(_onStateUpdate);
+    try {
+      _service = TunnelService();
+      _stateSub = _service!.stateUpdates.listen(_onStateUpdate);
+    } catch (e) {
+      _initError = '$e';
+    }
     _init();
   }
 
@@ -152,25 +304,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       _TrayIcon.connected => 'app_icon_connected.ico',
       _TrayIcon.error => 'app_icon_error.ico',
     };
-    await trayManager.setIcon(_assetIconPath(name));
-  }
-
-  /// tray_manager needs a real filesystem path, not a Flutter asset bundle
-  /// key. Flutter always stages assets under data/flutter_assets next to the
-  /// running executable (true for `flutter run` and for a packaged build
-  /// alike) -- unlike a path relative to windows/runner/resources, which
-  /// only exists in the source tree and is never copied into a build
-  /// output, silently breaking the tray icon outside `flutter run`.
-  String _assetIconPath(String fileName) {
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    return [
-      exeDir,
-      'data',
-      'flutter_assets',
-      'assets',
-      'icons',
-      fileName,
-    ].join(Platform.pathSeparator);
+    await trayManager.setIcon(_iconAssetPath(name));
   }
 
   void _onStateUpdate(ChimeraState s) {
@@ -270,6 +404,19 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
+  String _obfuscationLabel(ObfuscationMode mode) {
+    switch (mode) {
+      case ObfuscationMode.reality:
+        return 'Reality';
+      case ObfuscationMode.quicH3:
+        return 'QUIC / H3';
+      case ObfuscationMode.shadowsocksAead:
+        return 'Shadowsocks-AEAD';
+      case ObfuscationMode.dnsOverTcp:
+        return 'DNS-over-TCP';
+    }
+  }
+
   String _fmtBytes(int n) {
     if (n < 1024) return '$n B';
     if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
@@ -282,6 +429,15 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
   Future<void> _connect() async {
     if (_busy) return;
+    if (_service == null) {
+      await _showAtTray();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('CHIMERA engine failed to load: $_initError')),
+        );
+      }
+      return;
+    }
     if (_settings.servers.isEmpty) {
       await _showAtTray();
       return;
@@ -322,15 +478,22 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         return;
       }
 
-      final err = await _service.connect(
+      // Read live rather than baked into the saved server entry -- the
+      // capability token refreshes on its own ~24h TTL (AccountStore's
+      // background refresh), so a value captured once at "Choose server"
+      // time would go stale. Empty for BYO/legacy servers with no account.
+      final account = await AccountStore().load();
+
+      final err = await _service!.connect(
         _settings.subscriptionText(),
         primaryServer: PrimaryServer(
           host: resolved.host,
           port: resolved.port,
           pbk: resolved.pbk,
           sni: resolved.sni,
-          sid: resolved.sid,
+          sid: _effectiveSid(resolved.sid, account),
           transport: resolved.transport,
+          token: account?.token ?? '',
         ),
         signKeyHex: _settings.signKeyHex,
         mode: _settings.networkProtection,
@@ -373,13 +536,57 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     );
   }
 
-  /// Parses the first saved server's link into the fields
-  /// NetworkProtection.enable needs -- the same "primary server" convention
-  /// both _connect and the Settings hub's manual toggle use. Includes the
-  /// link's own transport Mode ('', 'auto', 'quic', or 'tcp') so the
-  /// TUN device actually uses whichever anti-censorship transport the
-  /// server was configured with (see server_form.dart's kTransportModes),
-  /// instead of always defaulting to chimera.exe tun's own "auto".
+  /// Parses a chimera:// link into the fields NetworkProtection.enable
+  /// needs, in pure Dart (mirrors internal/link.Parse's field set: host,
+  /// port, pbk, sni, sid, mode). Deliberately not routed through
+  /// ChimeraBindings/chimera.dll -- that FFI layer only exists on Windows
+  /// (ChimeraBindings.open() throws on Android), and a chimera:// link is
+  /// plain enough that dart:core's Uri handles it without any native call
+  /// on either platform.
+  ({bool ok, String error, String host, String port, String pbk, String sni, String sid, String transport})
+  _parseChimeraLink(String link) {
+    Uri uri;
+    try {
+      uri = Uri.parse(link.trim());
+    } catch (e) {
+      return (
+        ok: false,
+        error: 'invalid server link: $e',
+        host: '',
+        port: '',
+        pbk: '',
+        sni: '',
+        sid: '',
+        transport: '',
+      );
+    }
+    if (uri.scheme != 'chimera' || uri.host.isEmpty) {
+      return (
+        ok: false,
+        error: 'invalid server link: not a chimera:// URI',
+        host: '',
+        port: '',
+        pbk: '',
+        sni: '',
+        sid: '',
+        transport: '',
+      );
+    }
+    final q = uri.queryParameters;
+    return (
+      ok: true,
+      error: '',
+      host: uri.host,
+      port: uri.hasPort ? uri.port.toString() : '',
+      pbk: q['pbk'] ?? '',
+      sni: q['sni'] ?? '',
+      sid: q['sid'] ?? '',
+      transport: q['mode'] ?? '',
+    );
+  }
+
+  /// Resolves the first saved server -- the same "primary server" convention
+  /// both _connect and the Settings hub's manual toggle use.
   ({bool ok, String error, String host, String port, String pbk, String sni, String sid, String transport})
   _resolvePrimaryServer() {
     if (_settings.servers.isEmpty) {
@@ -394,41 +601,24 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         transport: '',
       );
     }
-    final primary = _settings.servers.first;
-    final bindings = ChimeraBindings.open();
-    final env = jsonDecode(bindings.parseLink(primary.link)) as Map<String, dynamic>;
-    final err = env['error'] as String? ?? '';
-    if (err.isNotEmpty) {
-      return (
-        ok: false,
-        error: err,
-        host: '',
-        port: '',
-        pbk: '',
-        sni: '',
-        sid: '',
-        transport: '',
-      );
-    }
-    final p = jsonDecode(env['result'] as String) as Map<String, dynamic>;
-    return (
-      ok: true,
-      error: '',
-      host: p['Host'] as String? ?? '',
-      port: p['Port'] as String? ?? '',
-      pbk: p['Pbk'] as String? ?? '',
-      sni: p['Sni'] as String? ?? '',
-      sid: p['Sid'] as String? ?? '',
-      transport: p['Mode'] as String? ?? '',
-    );
+    return _parseChimeraLink(_settings.servers.first.link);
   }
+
+  /// The short ID to dial with: a catalog-built chimera:// link never
+  /// carries `sid=` (that field is per-device, not per-server -- see
+  /// AccountInfo.shortIdHex's doc comment), so a -auth-mode controlplane
+  /// server needs the account's own control-plane short ID here instead of
+  /// the (empty) one parsed from the link. Legacy/BYO links that do embed a
+  /// literal sid= (useracl-mode servers) keep using that value unchanged.
+  String _effectiveSid(String linkSid, AccountInfo? account) =>
+      linkSid.isNotEmpty ? linkSid : (account?.shortIdHex ?? '');
 
   Future<void> _toggleConnection() async {
     if (_busy) return;
     if (_state.isConnected) {
       setState(() => _busy = true);
       try {
-        await _service.disconnect();
+        await _service?.disconnect();
       } finally {
         if (mounted) setState(() => _busy = false);
       }
@@ -437,14 +627,116 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
-  Future<void> _openServers() async {
+  /// Curated list (ROADMAP2 §2/§4) -- the sole way to pick a server in the
+  /// regular build. The old BYO screen (manual link entry, SSH auto-deploy,
+  /// per-server user management) is removed from the UI entirely per §4 --
+  /// the underlying Go logic (internal/provision, internal/admin) still
+  /// serves chimera-control-cli, it's just no longer reachable from here.
+  Future<void> _openCatalog() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) =>
-            ServersPage(servers: _settings.servers, onChanged: _persist),
+      ChimeraPageRoute(
+        builder: (_) => CatalogPage(
+          favoriteIds: _settings.favoriteServerIds,
+          selectedId: _settings.lastConnectedServerId,
+          onToggleFavorite: (id) async {
+            setState(() {
+              if (_settings.favoriteServerIds.contains(id)) {
+                _settings.favoriteServerIds.remove(id);
+              } else {
+                _settings.favoriteServerIds.add(id);
+              }
+            });
+            await _persist();
+          },
+          onSelect: (server) async {
+            setState(() {
+              _settings.lastConnectedServerId = server.id;
+              _upsertCuratedServer(server);
+            });
+            await _persist();
+            if (mounted) Navigator.of(context).pop();
+          },
+        ),
       ),
     );
     setState(() {});
+  }
+
+  /// Builds a `chimera://` link (same format `internal/link.Build` produces)
+  /// from a picked catalog entry and saves it as the primary server -- the
+  /// same "first saved server is what Connect uses" convention
+  /// _resolvePrimaryServer already relies on. This is what makes "Choose
+  /// server" actually wire up to a real connect target instead of just
+  /// recording a cosmetic pick.
+  ///
+  /// Deliberately does NOT embed the account's capability token here (no
+  /// `tok=` param) even though internal/link.Profile.Token/carrier.Config.Token
+  /// exist for it: the token refreshes on its own ~24h TTL (AccountStore's
+  /// background refresh), so baking one in at selection time would go stale
+  /// long before the server is deselected. _connect/_setNetworkProtection
+  /// read the live token from AccountStore instead, at connect time.
+  void _upsertCuratedServer(CatalogServer server) {
+    final mode = switch (_settings.obfuscationMode) {
+      ObfuscationMode.reality => '',
+      ObfuscationMode.quicH3 => 'quic',
+      ObfuscationMode.shadowsocksAead => 'ss',
+      ObfuscationMode.dnsOverTcp => 'dot',
+    };
+    final query = <String>[
+      'pbk=${Uri.encodeQueryComponent(server.pubKey)}',
+      if (server.sni.isNotEmpty) 'sni=${Uri.encodeQueryComponent(server.sni)}',
+      if (mode.isNotEmpty) 'mode=$mode',
+      if (server.fingerprint.isNotEmpty)
+        'fp=${Uri.encodeQueryComponent(server.fingerprint)}',
+    ].join('&');
+    final link = 'chimera://${server.host}:${server.port}?$query#${server.id}';
+
+    final existingIndex = _settings.servers.indexWhere(
+      (s) => s.id == 'catalog-${server.id}',
+    );
+    final entry = ServerEntry(
+      id: 'catalog-${server.id}',
+      label: '${server.city}, ${server.country}',
+      link: link,
+    );
+    if (existingIndex >= 0) {
+      _settings.servers[existingIndex] = entry;
+    } else {
+      _settings.servers.insert(0, entry);
+    }
+  }
+
+  Future<void> _openAnticensorship() async {
+    await Navigator.of(context).push(
+      ChimeraPageRoute(
+        builder: (_) => AnticensorshipPage(
+          current: _settings.obfuscationMode,
+          onChanged: (mode) async {
+            setState(() => _settings.obfuscationMode = mode);
+            await _persist();
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openAccount() async {
+    final account = await AccountStore().load();
+    if (account == null || !mounted) return;
+    await Navigator.of(context).push(
+      ChimeraPageRoute(
+        builder: (_) => AccountPage(
+          account: account,
+          onLoggedOut: () async {
+            if (!mounted) return;
+            await Navigator.of(context).pushAndRemoveUntil(
+              ChimeraPageRoute(builder: (_) => const AccountGate()),
+              (route) => false,
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _openSettingsHub() async {
@@ -492,15 +784,17 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     setState(() => _busy = true);
     try {
       final resolved = _resolvePrimaryServer();
+      final account = resolved.ok ? await AccountStore().load() : null;
       final result = resolved.ok
           ? await NetworkProtection.enable(
               mode: mode,
               server: '${resolved.host}:${resolved.port}',
               pbk: resolved.pbk,
               sni: resolved.sni,
-              sid: resolved.sid,
+              sid: _effectiveSid(resolved.sid, account),
               dns: _settings.customDns,
               transport: resolved.transport,
+              token: account?.token ?? '',
             )
           : NetworkProtectionResult(ok: false, error: resolved.error);
       if (result.ok) {
@@ -530,9 +824,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
   Future<void> _disconnectAndQuit() async {
     if (_state.isConnected) {
-      await _service.disconnect();
+      await _service?.disconnect();
     }
-    _service.dispose();
+    _service?.dispose();
     await trayManager.destroy();
     exit(0);
   }
@@ -542,20 +836,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   /// Display-only derivation; does not touch connection state.
   String _disguiseHost() {
     if (_settings.servers.isEmpty) return '';
-    try {
-      final bindings = ChimeraBindings.open();
-      final env =
-          jsonDecode(bindings.parseLink(_settings.servers.first.link))
-              as Map<String, dynamic>;
-      final err = env['error'] as String? ?? '';
-      if (err.isNotEmpty) return '';
-      final p = jsonDecode(env['result'] as String) as Map<String, dynamic>;
-      final sni = p['Sni'] as String? ?? '';
-      if (sni.isNotEmpty) return sni;
-      return p['Host'] as String? ?? '';
-    } catch (_) {
-      return '';
-    }
+    final p = _parseChimeraLink(_settings.servers.first.link);
+    if (!p.ok) return '';
+    return p.sni.isNotEmpty ? p.sni : p.host;
   }
 
   // Left click: toggle the popover open/closed, like Mullvad/Windows tray
@@ -652,8 +935,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         await _showAtTray();
         break;
       case 'quit':
-        await _service.disconnect();
-        _service.dispose();
+        await _service?.disconnect();
+        _service?.dispose();
         await trayManager.destroy();
         exit(0);
     }
@@ -695,6 +978,10 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
           children: [
             _buildBrandRow(context, tokens),
+            if (_initError != null) ...[
+              const SizedBox(height: 12),
+              _buildEngineErrorBanner(context, tokens),
+            ],
             const SizedBox(height: 20),
             _buildStatusCard(context, tokens),
             const SizedBox(height: 20),
@@ -703,9 +990,25 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
             _buildNavRow(
               context,
               tokens,
-              title: 'Servers',
-              subtitle: '${_settings.servers.length} saved',
-              onTap: _openServers,
+              title: 'Choose server',
+              subtitle: _settings.lastConnectedServerId ?? 'Curated locations',
+              onTap: _openCatalog,
+            ),
+            const SizedBox(height: 8),
+            _buildNavRow(
+              context,
+              tokens,
+              title: 'Anti-censorship',
+              subtitle: _obfuscationLabel(_settings.obfuscationMode),
+              onTap: _openAnticensorship,
+            ),
+            const SizedBox(height: 8),
+            _buildNavRow(
+              context,
+              tokens,
+              title: 'Account',
+              subtitle: 'Key, expiry, devices',
+              onTap: _openAccount,
             ),
             if (_state.isConnected && _state.endpoints.isNotEmpty) ...[
               const SizedBox(height: 20),
@@ -775,6 +1078,37 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildEngineErrorBanner(BuildContext context, ChimeraTokens tokens) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.error.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: scheme.error.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline, size: 18, color: scheme.error),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'CHIMERA engine failed to load, so Connect is unavailable: '
+              '$_initError',
+              style: TextStyle(
+                fontFamily: 'Plex Sans',
+                fontSize: 12,
+                color: scheme.error,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
