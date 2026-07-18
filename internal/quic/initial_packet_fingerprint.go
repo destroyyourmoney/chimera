@@ -11,9 +11,6 @@ import (
 	"github.com/quic-go/quic-go/quicvarint"
 )
 
-// InitialPacketSummary is the observable packet-level surface of a client QUIC
-// Initial. Packet contains the encrypted wire packet bytes for pcap/vantage use;
-// the stable fields are duplicated for deterministic unit assertions.
 type InitialPacketSummary struct {
 	Packet          []byte
 	Version         quicgo.Version
@@ -26,7 +23,6 @@ type InitialPacketSummary struct {
 	Frames          []string
 }
 
-// InitialPacketDiff describes one difference between two Initial summaries.
 type InitialPacketDiff struct {
 	Field string
 	Have  string
@@ -47,8 +43,6 @@ func SummarizeInitialPacketTrace(trace quicgo.InitialPacketTrace) InitialPacketS
 	}
 }
 
-// SummarizeInitialPacket parses the unprotected long-header fields from a QUIC
-// Initial packet. Encrypted payload/frame details are intentionally not guessed.
 func SummarizeInitialPacket(packet []byte) (InitialPacketSummary, error) {
 	if len(packet) < 7 {
 		return InitialPacketSummary{}, fmt.Errorf("initial packet: truncated")

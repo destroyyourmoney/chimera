@@ -10,7 +10,6 @@ import (
 	"chimera/internal/preconnect"
 )
 
-// startTCPEcho starts a TCP echo server and returns its address and a close func.
 func startTCPEcho(t *testing.T) (addr string, close func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,7 +36,7 @@ func TestPool_GetWarm(t *testing.T) {
 	defer cancel()
 
 	p := preconnect.New(ctx, addr, 2)
-	time.Sleep(200 * time.Millisecond) // let pool warm up
+	time.Sleep(200 * time.Millisecond)
 
 	c, err := p.Get(ctx)
 	if err != nil {
@@ -50,19 +49,17 @@ func TestPool_GetDegradedOnEmpty(t *testing.T) {
 	addr, closeServer := startTCPEcho(t)
 	defer closeServer()
 
-	// Zero-size pool always falls through to direct dial.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	p := preconnect.New(ctx, addr, 1)
-	// Don't wait for warm-up — immediately drain.
+
 	c1, err := p.Get(ctx)
 	if err != nil {
 		t.Fatalf("Get 1: %v", err)
 	}
 	c1.Close()
 
-	// Second get might dial directly if pool not yet refilled.
 	c2, err := p.Get(ctx)
 	if err != nil {
 		t.Fatalf("Get 2 (degraded): %v", err)
@@ -70,19 +67,6 @@ func TestPool_GetDegradedOnEmpty(t *testing.T) {
 	c2.Close()
 }
 
-// TestPool_GetDiscardsStaleConnection reproduces the production bug found
-// while testing the anti-probing fallback splice against a real CDN
-// (Akamai/www.microsoft.com): pooled connections that sat idle long enough
-// for the peer to close them were still handed out by Get, so the splice
-// wrote the replayed ClientHello into an already-dead socket and the
-// fallback silently broke — the real steal-host's response never came back —
-// instead of relaying a genuine response. Here the test server closes every
-// accepted connection shortly after accepting it (simulating that CDN
-// idle-close behavior) but echoes anything it reads before that; Get, called
-// only after that close window has passed, must return a connection that
-// completes a real round trip — a plain non-nil return (or a write that
-// happens to still succeed into a half-closed socket) is not enough to prove
-// that, which is why this checks for the echo rather than just the write.
 func TestPool_GetDiscardsStaleConnection(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -96,7 +80,7 @@ func TestPool_GetDiscardsStaleConnection(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				time.AfterFunc(30*time.Millisecond, func() { c.Close() }) // simulate a short-lived CDN idle timeout
+				time.AfterFunc(30*time.Millisecond, func() { c.Close() })
 				buf := make([]byte, 64)
 				for {
 					n, err := c.Read(buf)
@@ -115,9 +99,7 @@ func TestPool_GetDiscardsStaleConnection(t *testing.T) {
 	defer cancel()
 
 	p := preconnect.New(ctx, ln.Addr().String(), 2)
-	// Let every pooled connection go stale (closed peer-side) before Get is
-	// ever called — this is exactly the "unauthenticated probe arrives after
-	// the pool has been sitting idle for a while" scenario from production.
+
 	time.Sleep(150 * time.Millisecond)
 
 	c, err := p.Get(ctx)
@@ -145,6 +127,6 @@ func TestPool_ContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = preconnect.New(ctx, addr, 2)
-	cancel() // pool should drain silently, no panic
+	cancel()
 	time.Sleep(50 * time.Millisecond)
 }

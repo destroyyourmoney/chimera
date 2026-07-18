@@ -14,7 +14,6 @@ import (
 	"chimera/internal/server"
 )
 
-// countConn wraps net.Conn and counts bytes transferred.
 type countConn struct {
 	net.Conn
 	rx, tx atomic.Int64
@@ -34,9 +33,6 @@ func (c *countConn) Write(b []byte) (int, error) {
 
 const stealBanner = "STEAL-HOST-REAL-RESPONSE"
 
-// fakeSteal stands in for the real steal-host: on every connection it emits a
-// known banner, so a test can prove that an unauthorized peer was transparently
-// spliced to it.
 func fakeSteal(t *testing.T) (addr string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -59,7 +55,6 @@ func fakeSteal(t *testing.T) (addr string, stop func()) {
 	return ln.Addr().String(), func() { _ = ln.Close() }
 }
 
-// startServer brings up a carrier on an ephemeral port and returns its address.
 func startServer(t *testing.T, priv, sid, stealAddr string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -100,9 +95,6 @@ func TestUnauthorizedIsSplicedToStealHost(t *testing.T) {
 	defer stopSteal()
 	srvAddr := startServer(t, priv, "0a1b2c3d", stealAddr)
 
-	// Connect with a syntactically valid but UNauthenticated ClientHello (random
-	// session id is not a real auth tag). The server must splice us to the steal
-	// host, so we read its banner back.
 	conn, err := net.Dial("tcp", srvAddr)
 	if err != nil {
 		t.Fatal(err)
@@ -131,20 +123,12 @@ func TestWrongShortIDFallsBack(t *testing.T) {
 	defer stopSteal()
 	srvAddr := startServer(t, priv, "0a1b2c3d", stealAddr)
 
-	// Correct key but a shortID outside the allowed set: must not authenticate.
 	cfg := carrier.Config{Server: srvAddr, PubB64: pub, SNI: "example.com", ShortIDHex: "deadbeef"}
 	if err := carrier.Ping(cfg); err == nil {
 		t.Fatal("ping with disallowed shortID should not authenticate")
 	}
 }
 
-// TestSessionStartupByteCount verifies that a PING session startup does not
-// exceed the ~15–20 KB per-session wire budget. This guards against runaway
-// padding or bloated handshake overhead.
-//
-// Technique: a local counting-relay sits between the carrier client and the
-// CHIMERA server. carrier.Ping dials the relay; the relay forwards to the real
-// server through a countConn, accumulating tx+rx bytes.
 func TestSessionStartupByteCount(t *testing.T) {
 	const maxBytes = 20 * 1024
 
@@ -156,14 +140,12 @@ func TestSessionStartupByteCount(t *testing.T) {
 	defer stopSteal()
 	srvAddr := startServer(t, priv, "aabbccdd", stealAddr)
 
-	// Dial the real server once for the relay goroutine.
 	serverConn, err := net.DialTimeout("tcp", srvAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial server: %v", err)
 	}
 	counted := &countConn{Conn: serverConn}
 
-	// Accept exactly one client connection from carrier.Ping and relay through counted.
 	relayLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("relay listen: %v", err)

@@ -16,7 +16,7 @@ func TestIsAlive_OpenIdleConnection(t *testing.T) {
 		c, err := ln.Accept()
 		if err == nil {
 			defer c.Close()
-			time.Sleep(200 * time.Millisecond) // stay open, send nothing
+			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 
@@ -40,7 +40,7 @@ func TestIsAlive_PeerClosed(t *testing.T) {
 	go func() {
 		c, err := ln.Accept()
 		if err == nil {
-			c.Close() // simulates a CDN edge closing an unused connection
+			c.Close()
 		}
 	}()
 
@@ -50,7 +50,7 @@ func TestIsAlive_PeerClosed(t *testing.T) {
 	}
 	defer c.Close()
 
-	time.Sleep(50 * time.Millisecond) // let the FIN arrive
+	time.Sleep(50 * time.Millisecond)
 	if isAlive(c) {
 		t.Fatal("a connection the peer already closed must be reported dead, not alive")
 	}
@@ -66,7 +66,7 @@ func TestIsAlive_DataAlreadyWaiting(t *testing.T) {
 		c, err := ln.Accept()
 		if err == nil {
 			defer c.Close()
-			_, _ = c.Write([]byte("x")) // unsolicited byte: treat as unusable
+			_, _ = c.Write([]byte("x"))
 			time.Sleep(200 * time.Millisecond)
 		}
 	}()
@@ -107,8 +107,7 @@ func TestIsAlive_ReadDeadlineIsResetAfterCheck(t *testing.T) {
 	if !isAlive(c) {
 		t.Fatal("expected alive: no data waiting yet at check time")
 	}
-	// The deadline set by isAlive must not linger and cause a later real read
-	// (well within the 20ms staleCheckTimeout) to fail spuriously.
+
 	buf := make([]byte, 4)
 	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)

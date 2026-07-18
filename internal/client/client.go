@@ -1,7 +1,3 @@
-// Package client is the CHIMERA client PoC: it performs the stealth handshake
-// against a server and issues a single PING over the carrier to confirm that
-// authentication and the tunnel path work end-to-end. Real traffic goes through
-// the SOCKS5 inbound (package socks); this command exists for diagnostics.
 package client
 
 import (
@@ -10,7 +6,6 @@ import (
 	"chimera/internal/carrier"
 )
 
-// Config mirrors carrier.Config for the diagnostic client.
 type Config struct {
 	Server     string
 	PubB64     string
@@ -18,12 +13,10 @@ type Config struct {
 	ShortIDHex string
 	Transport  string
 	Fp         string
-	// Token is the control-plane capability token (ROADMAP2 §1), needed
-	// only against a server running -auth-mode controlplane.
+
 	Token string
 }
 
-// Run performs one handshake + PING and reports the result.
 func Run(cfg Config) error {
 	c := carrier.Config{
 		Server:     cfg.Server,

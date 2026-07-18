@@ -54,7 +54,7 @@ func TestServerVerifierRejectsRevokedShortID(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	v.poll() // synchronous, deterministic for the test instead of racing Watch's ticker
+	v.poll()
 	if v.VerifyToken(tok, "deadbeef") {
 		t.Fatal("expected revoked short id to be rejected")
 	}

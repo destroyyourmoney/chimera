@@ -7,6 +7,8 @@
 /bin/
 /chimera.exe
 /chimera-helper.exe
+/chimera-control-cli.exe
+/build_log.txt
 
 # desktop/cffi generates these next to main.go via
 # `go build -buildmode=c-archive|c-shared` (see its doc comment)
@@ -41,3 +43,8 @@ Thumbs.db
 .idea/
 
 dist/
+
+# Standalone Telegram deploy-bot -- separate tool, own secrets (.env with bot
+# token), not part of the chimera build; never ship to the public repo.
+/chimera_bot/
+/venv

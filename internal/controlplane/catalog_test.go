@@ -28,7 +28,7 @@ func TestCatalogAddListRemove(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("expected 2 servers, got %d", len(list))
 	}
-	// Healthy servers sort first.
+
 	if list[0].ID != id1 {
 		t.Fatalf("expected healthy server (id=%d) first, got id=%d", id1, list[0].ID)
 	}
@@ -136,7 +136,6 @@ func TestCatalogAddListener(t *testing.T) {
 		t.Fatalf("expected 3 listeners (reality + quic + ss), got %+v", list[0].Listeners)
 	}
 
-	// Redeploying QUIC on a new port updates in place rather than duplicating.
 	if err := store.AddListener(id, "quic", 9443); err != nil {
 		t.Fatalf("AddListener (update): %v", err)
 	}

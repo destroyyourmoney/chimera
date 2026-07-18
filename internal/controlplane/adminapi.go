@@ -1,9 +1,3 @@
-// Admin API (ROADMAP2 §2): bearer-token HTTP surface backing
-// `chimera-control-cli`, not any GUI -- ROADMAP2 §2 is explicit that
-// catalog/key management lives entirely in the operator's terminal, never
-// in a distributed client binary. Same auth pattern as internal/admin
-// (constant-time bearer compare), deliberately a separate namespace since
-// this manages the whole fleet/account base, not one server's user list.
 package controlplane
 
 import (
@@ -16,8 +10,6 @@ import (
 	"time"
 )
 
-// NewAdminMux builds the admin API mux. token gates every route with a
-// constant-time compare, same as internal/admin.withAuth.
 func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, revocations *RevocationStore) (*http.ServeMux, error) {
 	if token == "" {
 		return nil, errors.New("controlplane: admin token must not be empty")
@@ -26,7 +18,7 @@ func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, re
 
 	mux.HandleFunc("POST /v1/admin/accounts", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			ExpiresAt   string `json:"expires_at"` // RFC3339
+			ExpiresAt   string `json:"expires_at"`
 			DeviceLimit int    `json:"device_limit"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -89,10 +81,7 @@ func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, re
 			writeErr(w, http.StatusInternalServerError, "failed to remove devices")
 			return
 		}
-		// Deleting the device row alone leaves an already-issued token for it
-		// valid until its own TTL elapses -- push each freed short ID onto the
-		// instant-revocation list too so a removed device is actually cut off
-		// immediately, not just unable to redeem again.
+
 		for _, sid := range shortIDs {
 			if err := revocations.Revoke(sid); err != nil {
 				slog.Error("controlplane: revoke removed device failed", "short_id", sid, "err", err)
@@ -101,6 +90,32 @@ func NewAdminMux(token string, accounts *AccountStore, catalog *CatalogStore, re
 		writeJSON(w, http.StatusOK, map[string]any{
 			"removed_count": len(shortIDs),
 			"short_ids":     shortIDs,
+		})
+	})
+
+	mux.HandleFunc("POST /v1/admin/accounts/status", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AccountNumber string `json:"account_number"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		st, err := accounts.Status(body.AccountNumber)
+		if err != nil {
+			if errors.Is(err, ErrAccountNotFound) {
+				writeErr(w, http.StatusNotFound, "no such account")
+				return
+			}
+			slog.Error("controlplane: account status failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "failed to get account status")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":       st.Status,
+			"expires_at":   st.ExpiresAt.Unix(),
+			"device_count": st.DeviceCount,
+			"device_limit": st.DeviceLimit,
 		})
 	})
 

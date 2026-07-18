@@ -18,10 +18,6 @@ import (
 	"chimera/internal/rudp"
 )
 
-// dialLoopbackQUIC brings up a loopback QUIC connection with RFC 9221 datagrams
-// enabled and returns the client and server *quic.Conn ends. It mirrors the
-// carrier's TLS/ALPN/datagram config but skips the auth handshake — this test
-// targets the rudp-over-datagram contract, not the carrier protocol.
 func dialLoopbackQUIC(t *testing.T) (client, server *quic.Conn) {
 	t.Helper()
 	tlsConf, err := serverTLS()
@@ -61,18 +57,11 @@ func dialLoopbackQUIC(t *testing.T) (client, server *quic.Conn) {
 	return client, server
 }
 
-// TestRUDPOverQUICDatagrams is the phase-4 e2e: a reliable, FEC-protected rudp
-// bytestream carried over a real QUIC DATAGRAM channel must deliver a bulk
-// transfer byte-exact (mirrors the spirit of TestQUICUDPAssocEcho, but for the
-// bulk sub-mode). It proves the same rudp code that the in-memory lossy-pipe
-// property tests exercise also works over the production datagram transport.
 func TestRUDPOverQUICDatagrams(t *testing.T) {
 	clientConn, serverConn := dialLoopbackQUIC(t)
 	defer clientConn.CloseWithError(0, "")
 	defer serverConn.CloseWithError(0, "")
 
-	// MSS conservative so a frame plus rudp+FEC headers never exceeds the QUIC
-	// datagram path MTU on loopback.
 	cfg := rudp.Config{MSS: 1000, FEC: true}
 	sender := rudp.NewConn(newQUICDatagram(clientConn), cfg)
 	receiver := rudp.NewConn(newQUICDatagram(serverConn), cfg)
@@ -114,11 +103,6 @@ func TestRUDPOverQUICDatagrams(t *testing.T) {
 	t.Logf("rudp-over-QUIC byte-exact: %d bytes, sender stats %+v", len(got), sender.Stats())
 }
 
-// TestRUDPCarrierConnectRelay exercises the full quic-rudp carrier path end to
-// end: the client dials the real carrier (auth stream + CmdConnectRUDP), the
-// server dials an echo target and splices it to an rudp stream over the QUIC
-// datagram channel, and a multi-MB echo round-trips byte-exact. This is the
-// integration the Docker netem bench (MODE=quic-rudp) drives.
 func TestRUDPCarrierConnectRelay(t *testing.T) {
 	addr, pub := startServer(t)
 	echoHost, echoPort := startEcho(t)
@@ -143,7 +127,7 @@ func TestRUDPCarrierConnectRelay(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, readErr = io.ReadFull(conn, got) // read the echo concurrently with the write
+		_, readErr = io.ReadFull(conn, got)
 	}()
 
 	if _, err := conn.Write(payload); err != nil {

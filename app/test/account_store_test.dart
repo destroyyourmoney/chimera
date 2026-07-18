@@ -1,10 +1,3 @@
-// Pure logic tests for account_store.dart: key normalization/validation
-// (must agree byte-for-byte with internal/controlplane's Go-side alphabet,
-// see account_store.dart's keyAlphabet doc comment) and AccountInfo's JSON
-// round-trip. HTTP calls (redeem/refresh/AccountStore.load's file I/O)
-// aren't covered here -- same rationale as settings_store_test.dart's doc
-// comment: no platform channel worth mocking for what's essentially a thin
-// wrapper, the branching logic worth testing is normalization/validation.
 import 'package:chimera_tray/account_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -15,11 +8,17 @@ void main() {
     });
 
     test('is idempotent on an already-grouped key', () {
-      expect(normalizeAccountNumber('7K2M-9PQR-4TZS-XW3H'), '7K2M-9PQR-4TZS-XW3H');
+      expect(
+        normalizeAccountNumber('7K2M-9PQR-4TZS-XW3H'),
+        '7K2M-9PQR-4TZS-XW3H',
+      );
     });
 
     test('strips stray whitespace', () {
-      expect(normalizeAccountNumber(' 7K2M 9PQR 4TZS XW3H '), '7K2M-9PQR-4TZS-XW3H');
+      expect(
+        normalizeAccountNumber(' 7K2M 9PQR 4TZS XW3H '),
+        '7K2M-9PQR-4TZS-XW3H',
+      );
     });
 
     test('handles partial input without throwing (in-progress typing)', () {
@@ -38,14 +37,15 @@ void main() {
       expect(isValidAccountNumber('7K2M-9PQR-4TZS-XW3H-EXTRA'), isFalse);
     });
 
-    test('rejects excluded characters 0/O/1/I (Crockford minus confusables)', () {
-      // '0', 'O', '1', 'I' are all deliberately absent from the alphabet
-      // (ROADMAP2 §1) -- a key containing any of them can't be a real one.
-      expect(isValidAccountNumber('0000-0000-0000-0000'), isFalse);
-      expect(isValidAccountNumber('OOOO-OOOO-OOOO-OOOO'), isFalse);
-      expect(isValidAccountNumber('1111-1111-1111-1111'), isFalse);
-      expect(isValidAccountNumber('IIII-IIII-IIII-IIII'), isFalse);
-    });
+    test(
+      'rejects excluded characters 0/O/1/I (Crockford minus confusables)',
+      () {
+        expect(isValidAccountNumber('0000-0000-0000-0000'), isFalse);
+        expect(isValidAccountNumber('OOOO-OOOO-OOOO-OOOO'), isFalse);
+        expect(isValidAccountNumber('1111-1111-1111-1111'), isFalse);
+        expect(isValidAccountNumber('IIII-IIII-IIII-IIII'), isFalse);
+      },
+    );
 
     test('rejects lowercase (normalize first)', () {
       expect(isValidAccountNumber('7k2m-9pqr-4tzs-xw3h'), isFalse);
@@ -113,10 +113,13 @@ void main() {
         token: 't',
         tokenIssuedAt: DateTime.utc(2026, 1, 1),
       );
-      final updated = info.copyWith(deviceCount: 3, status: AccountStatus.revoked);
+      final updated = info.copyWith(
+        deviceCount: 3,
+        status: AccountStatus.revoked,
+      );
       expect(updated.deviceCount, 3);
       expect(updated.status, AccountStatus.revoked);
-      // Untouched fields carry over.
+
       expect(updated.numberMasked, 'x');
       expect(updated.token, 't');
     });

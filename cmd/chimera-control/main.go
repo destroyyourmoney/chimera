@@ -1,11 +1,3 @@
-// Command chimera-control runs the account/catalog control-plane
-// (ROADMAP2 §0): the public API (redeem/refresh/catalog/revocations/mirrors)
-// and the loopback-only admin API that chimera-control-cli talks to.
-// It is the only process with database access -- data-plane servers and
-// clients only ever call its HTTP APIs or verify its signed tokens locally.
-//
-//	chimera-control keygen -out control.key
-//	chimera-control serve -db control.db -signing-key control.key -listen :8443 -admin-listen 127.0.0.1:8444 -admin-token TOKEN
 package main
 
 import (
@@ -33,6 +25,8 @@ func main() {
 		keygenCmd(os.Args[2:])
 	case "serve":
 		serveCmd(os.Args[2:])
+	case "gencert":
+		gencertCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -41,13 +35,31 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: chimera-control keygen -out FILE")
-	fmt.Fprintln(os.Stderr, "       chimera-control serve -db FILE -signing-key FILE -listen ADDR -admin-listen ADDR -admin-token TOKEN [-mirrors host1,host2]")
+	fmt.Fprintln(os.Stderr, "       chimera-control gencert -out FILE -host HOST_OR_IP [-days 3650]")
+	fmt.Fprintln(os.Stderr, "       chimera-control serve -db FILE -signing-key FILE -listen ADDR -admin-listen ADDR -admin-token TOKEN [-tls-cert FILE -tls-key FILE] [-mirrors host1,host2]")
 }
 
-// keygenCmd generates a fresh Ed25519 signing keypair (ROADMAP2 §0.1 п.4).
-// The private key file is a deploy secret; the public key is what gets
-// distributed to data-plane servers (-controlplane-pubkey) and baked into
-// client builds.
+func gencertCmd(args []string) {
+	fs := flag.NewFlagSet("gencert", flag.ExitOnError)
+	out := fs.String("out", "control", "output basename: writes FILE.crt and FILE.key")
+	host := fs.String("host", "", "IP address or DNS name the cert covers (required, e.g. the -listen public address)")
+	days := fs.Int("days", 3650, "certificate validity in days")
+	fs.Parse(args)
+
+	if *host == "" {
+		fmt.Fprintln(os.Stderr, "gencert: -host is required")
+		os.Exit(2)
+	}
+	pin, err := controlplane.GenerateSelfSignedCert(*out+".crt", *out+".key", *host, *days)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gencert:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("wrote %s.crt and %s.key\n", *out, *out)
+	fmt.Printf("SHA-256 cert pin (embed in the client's kMirrorCertPins for this host): %s\n", pin)
+	fmt.Println("this is self-signed -- clients must pin the SPKI hash above, not rely on a public CA")
+}
+
 func keygenCmd(args []string) {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	out := fs.String("out", "control.key", "private key output path (public key written to FILE.pub)")
@@ -73,18 +85,22 @@ func serveCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dbPath := fs.String("db", "control.db", "SQLite database path")
 	signingKeyPath := fs.String("signing-key", "", "path to the current Ed25519 signing private key (required)")
-	// prevSigningPubKeys accepts hex-encoded public keys still honored for
-	// verification during a rotation grace window (ROADMAP2 §0.1 п.4) --
-	// tokens signed by the outgoing key keep verifying until it's retired.
+
 	prevPubKeysFlag := fs.String("previous-pubkeys", "", "comma-separated hex Ed25519 public keys still accepted (rotation grace window)")
 	listen := fs.String("listen", ":8443", "public API listen address")
 	adminListen := fs.String("admin-listen", "127.0.0.1:8444", "admin API listen address (loopback-only recommended)")
 	adminToken := fs.String("admin-token", "", "bearer token for the admin API (required)")
 	mirrorsFlag := fs.String("mirrors", "", "comma-separated mirror addresses served at /v1/mirrors (ROADMAP2 §0.1 п.5)")
+	tlsCert := fs.String("tls-cert", "", "PEM certificate for the public API; serves plain HTTP if unset (redeem/refresh/catalog then travel unencrypted)")
+	tlsKey := fs.String("tls-key", "", "PEM private key matching -tls-cert")
 	fs.Parse(args)
 
 	if *signingKeyPath == "" || *adminToken == "" {
 		usage()
+		os.Exit(2)
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		fmt.Fprintln(os.Stderr, "serve: -tls-cert and -tls-key must be set together")
 		os.Exit(2)
 	}
 
@@ -142,7 +158,12 @@ func serveCmd(args []string) {
 
 	errCh := make(chan error, 2)
 	go func() {
-		slog.Info("chimera-control: public API listening", "addr", *listen)
+		if *tlsCert != "" {
+			slog.Info("chimera-control: public API listening (tls)", "addr", *listen)
+			errCh <- publicSrv.ListenAndServeTLS(*tlsCert, *tlsKey)
+			return
+		}
+		slog.Warn("chimera-control: public API listening WITHOUT TLS -- account_number/device_pubkey/token travel in the clear; set -tls-cert/-tls-key", "addr", *listen)
 		errCh <- publicSrv.ListenAndServe()
 	}()
 	go func() {

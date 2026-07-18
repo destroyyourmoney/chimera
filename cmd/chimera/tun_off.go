@@ -10,8 +10,6 @@ import (
 	"chimera/internal/winnet"
 )
 
-// runTUN stub for builds without the netstack data path (default build, or
-// unsupported OS). TUN mode requires -tags chimera_netstack on linux/darwin/windows.
 func runTUN(_ context.Context, _ endpoint.Dialer, _ string, _ int, _ *winnet.Config, _ bool, _, _, _ string) error {
 	return errors.New("tun mode requires building with -tags chimera_netstack on linux/darwin/windows")
 }

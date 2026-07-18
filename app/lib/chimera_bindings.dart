@@ -1,10 +1,3 @@
-// Typed dart:ffi bindings for chimera.dll (built from desktop/cffi via
-// `-buildmode=c-shared`). Mirrors mobile.Tunnel's lifecycle (see
-// desktop/cffi/main.go's doc comment): every Pointer<Utf8> this library
-// returns is heap-allocated on the Go side and MUST be freed via
-// ChimeraFreeString once its contents are copied out -- callers in this file
-// do that immediately, so nothing above this layer ever touches a raw
-// pointer's lifetime.
 import 'dart:ffi';
 import 'dart:io';
 
@@ -57,10 +50,6 @@ typedef _FreeHandleDart = void Function(int handle);
 typedef _FreeStringNative = Void Function(Pointer<Utf8> s);
 typedef _FreeStringDart = void Function(Pointer<Utf8> s);
 
-/// ChimeraNativeApi is the interface ChimeraService and other callers depend
-/// on, so tests can inject a fake instead of loading the real chimera.dll
-/// (which isn't present in the `flutter test` working directory, and which
-/// makes an actual native call per invocation).
 abstract class ChimeraNativeApi {
   String newTunnel(String subscriptionText, String signKeyHex);
   String newTunnelFromLink(String uri);
@@ -71,34 +60,18 @@ abstract class ChimeraNativeApi {
   String stateJSON(int handle);
   String parseLink(String uri);
 
-  /// deployServer bootstraps a CHIMERA server on a bare VPS over SSH (see
-  /// ChimeraDeployServer in desktop/cffi/main.go). It blocks for the whole
-  /// deployment (installing Docker + building an image can take minutes) --
-  /// callers MUST invoke this on a background isolate, never the UI isolate.
   String deployServer(String specJson);
 
-  /// teardownServer removes any CHIMERA-managed Docker container(s) from a
-  /// VPS over SSH (see ChimeraTeardownServer in desktop/cffi/main.go) -- the
-  /// counterpart to deployServer, called when a server is deleted from the
-  /// app. Same "background isolate only" contract as deployServer.
   String teardownServer(String specJson);
   void freeHandle(int handle);
 }
 
-/// Android has no chimera.dll to preflight against -- [ChimeraBindings.open]
-/// throws on this platform. That preflight (newTunnel/connect/freeHandle in
-/// TunnelService._connectOnce, see chimera_service.dart) exists to verify
-/// reachability fast before engaging the real TUN device; on Android that
-/// same check already happens inside `chimeramobile.Tunnel.connect()`,
-/// called synchronously by ChimeraVpnService.kt's RealGoTunnel.start before
-/// it opens the tunnel. So this stub just reports success unconditionally
-/// and lets AndroidNetworkProtectionController.engage (network_protection.dart)
-/// do the real work end to end.
 class AndroidNoPreflightNativeApi implements ChimeraNativeApi {
   const AndroidNoPreflightNativeApi();
 
   @override
-  String newTunnel(String subscriptionText, String signKeyHex) => '{"handle":0,"error":""}';
+  String newTunnel(String subscriptionText, String signKeyHex) =>
+      '{"handle":0,"error":""}';
   @override
   String newTunnelFromLink(String uri) => '{"handle":0,"error":""}';
   @override
@@ -123,10 +96,6 @@ class AndroidNoPreflightNativeApi implements ChimeraNativeApi {
   void freeHandle(int handle) {}
 }
 
-/// ChimeraBindings loads chimera.dll (resolved relative to the running
-/// executable, same directory dart:ffi's DynamicLibrary.open searches by
-/// default on Windows) and exposes the exported C functions with Dart
-/// types instead of raw FFI signatures.
 class ChimeraBindings implements ChimeraNativeApi {
   ChimeraBindings._(DynamicLibrary lib)
     : _newTunnelNative = lib.lookupFunction<_NewTunnelNative, _NewTunnelDart>(
@@ -185,10 +154,6 @@ class ChimeraBindings implements ChimeraNativeApi {
 
   static ChimeraBindings? _instance;
 
-  /// open loads chimera.dll once and caches the bindings. Each isolate that
-  /// calls a blocking function (StartFD/StartSocks) must call this again --
-  /// DynamicLibrary handles aren't shared across isolates, only the plain-int
-  /// tunnel handle is (see ChimeraService).
   factory ChimeraBindings.open() {
     return _instance ??= ChimeraBindings._(_loadLibrary());
   }
@@ -202,9 +167,6 @@ class ChimeraBindings implements ChimeraNativeApi {
     );
   }
 
-  /// _takeString copies a native UTF-8 string to Dart and frees the native
-  /// buffer -- the ownership contract every export in desktop/cffi/main.go
-  /// documents.
   String _takeString(Pointer<Utf8> p) {
     final s = p.toDartString();
     _freeStringNative(p);

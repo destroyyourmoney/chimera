@@ -18,9 +18,6 @@ func startSSServer(t *testing.T, cfg carrier.SSServerConfig) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// Bind an ephemeral port ourselves so the test doesn't race SSServe's
-	// own net.Listen -- SSServe takes cfg.Listen as a dial address string,
-	// so resolve a free port up front.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -31,8 +28,7 @@ func startSSServer(t *testing.T, cfg carrier.SSServerConfig) string {
 
 	ready := make(chan struct{})
 	go func() {
-		// SSServe itself does the real net.Listen; give it a moment before
-		// the caller dials.
+
 		close(ready)
 		_ = carrier.SSServe(ctx, cfg)
 	}()
@@ -115,7 +111,7 @@ func TestSSConnectRelays(t *testing.T) {
 }
 
 type fakeTokenVerifier struct {
-	valid map[string]string // token -> allowed shortIDHex
+	valid map[string]string
 }
 
 func (f fakeTokenVerifier) VerifyToken(token, shortIDHex string) bool {

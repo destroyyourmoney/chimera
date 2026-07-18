@@ -9,13 +9,13 @@ import (
 func TestFrameRoundTripInLockstep(t *testing.T) {
 	secret := []byte("shared-secret-from-x25519-ecdh-32b")
 	wr := New(secret, ClientToServer)
-	rd := New(secret, ClientToServer) // peer derives the same stream
+	rd := New(secret, ClientToServer)
 
 	payloads := [][]byte{
-		{0x00},                         // PING
-		{0x01, 0x03, 'a', 'b', 'c'},    // CONNECT-ish
-		{},                             // empty
-		bytes.Repeat([]byte{0xaa}, 40), // larger
+		{0x00},
+		{0x01, 0x03, 'a', 'b', 'c'},
+		{},
+		bytes.Repeat([]byte{0xaa}, 40),
 	}
 
 	var wire bytes.Buffer
@@ -43,7 +43,7 @@ func TestPaddingHidesTinyControlLengths(t *testing.T) {
 	secret := []byte("another-secret")
 	s := New(secret, ServerToClient)
 	var wire bytes.Buffer
-	// A 1-byte status reply must not appear as a 1- or 3-byte packet on the wire.
+
 	if err := WriteFrame(&wire, s, []byte{0x01}); err != nil {
 		t.Fatal(err)
 	}
@@ -59,20 +59,18 @@ func TestDirectionsAreIndependent(t *testing.T) {
 	secret := []byte("dir-secret")
 	c2s := New(secret, ClientToServer)
 	s2c := New(secret, ServerToClient)
-	// Different labels must yield different padding length sequences.
+
 	if c2s.padLen() == s2c.padLen() && c2s.padLen() == s2c.padLen() {
 		t.Error("c2s and s2c streams produced identical sequences")
 	}
 }
 
 func TestReadFrameRejectsOversizedHeader(t *testing.T) {
-	// payloadLen header claims 0xFFFF but MaxPayload is the cap; with no body the
-	// reader must fail cleanly, not allocate-and-hang.
+
 	s := New([]byte("x"), ClientToServer)
 	wire := bytes.NewReader([]byte{0xff, 0xff})
 	if _, err := ReadFrame(wire, s); err == nil || err == io.EOF {
-		// io.EOF is acceptable (short body); a panic or hang is not. Either a
-		// clean non-nil error or EOF on the truncated body is fine.
+
 		if err == nil {
 			t.Fatal("expected error on truncated oversized frame")
 		}

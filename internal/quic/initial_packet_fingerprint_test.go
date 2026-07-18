@@ -13,19 +13,6 @@ import (
 	"chimera/internal/carrier"
 )
 
-// TestChromeH3InitialSpansMultiplePackets locks in a discovery made while
-// investigating whether "2-datagram Initial splitting" (real Chrome's
-// post-quantum ClientHello, ~1.7-1.9KB, doesn't fit one QUIC Initial payload
-// and spans 2 UDP datagrams) needed dedicated packet_packer.go work: it does
-// not. CHIMERA's chrome-h3 ClientHello (HelloChrome_133 + a genuine
-// X25519MLKEM768 key share) is already large enough to not fit one Initial
-// packet, and quic-go's existing, unmodified CRYPTO-stream fragmentation
-// already splits it across multiple Initial packets — each one still
-// carrying CRYPTO frame(s) before trailing PADDING, and each still using
-// Chrome's fixed connection-ID shape (8-byte DCID, zero-length SCID). This
-// test guards that behavior so a future change to the ClientHello size or
-// the packer doesn't silently collapse back to a single (non-Chrome-shaped,
-// truncated) packet without anyone noticing.
 func TestChromeH3InitialSpansMultiplePackets(t *testing.T) {
 	addr, pub := startServer(t)
 
@@ -68,16 +55,6 @@ func TestChromeH3InitialSpansMultiplePackets(t *testing.T) {
 	}
 }
 
-// TestChromeH3InitialCryptoFragmentedWithPING locks in the CRYPTO/PING
-// frame-fragmentation fix from a live Chrome 150 capture (see
-// docs/uquic-initial-fingerprint.md, increment 10): real Chrome fragments
-// its Initial CRYPTO data into several small frames interspersed with PING
-// frames, not one or two large CRYPTO frames — which was itself a
-// distinguishing signal (see packChromeH3InitialCryptoFrames in
-// third_party/quic-go/packet_packer.go). This asserts at least one
-// CRYPTO-carrying Initial packet contains a PING frame and more than one
-// CRYPTO frame, so a future change can't silently collapse the
-// fragmentation back to the old "big CRYPTO + PADDING" shape.
 func TestChromeH3InitialCryptoFragmentedWithPING(t *testing.T) {
 	addr, pub := startServer(t)
 
@@ -187,9 +164,7 @@ func TestChromeH3InitialPacketFingerprintHarness(t *testing.T) {
 		parsedPacket.TokenLen != packet.TokenLen {
 		t.Fatalf("parsed packet summary = %+v, trace summary = %+v", parsedPacket, packet)
 	}
-	// Real Chrome uses a fixed 8-byte DCID guess and a zero-length client
-	// SCID (pcap-derived reference); both are asserted exactly, not just
-	// bounded, since a wrong-but-in-range value is still a mismatch.
+
 	if packet.DestConnIDLen != 8 {
 		t.Fatalf("dcid length = %d, want 8 (Chrome's fixed Initial DCID length)", packet.DestConnIDLen)
 	}
@@ -217,15 +192,6 @@ func TestChromeH3InitialPacketFingerprintHarness(t *testing.T) {
 	assertTransportParameterOrder(t, hello.QUICParams)
 }
 
-// assertInitialFramesCryptoBeforePadding checks the Chrome-shaped Initial
-// frame layout: CRYPTO frames interspersed with PING frames (real Chrome
-// fragments its Initial CRYPTO data into many small frames with PING
-// interleaved — see packChromeH3InitialCryptoFrames in
-// third_party/quic-go/packet_packer.go and docs/uquic-initial-fingerprint.md
-// increment 10), followed by trailing PADDING. It does not require at least
-// one CRYPTO frame, since an ACK-only Initial packet (no CRYPTO frame at
-// all, e.g. crypto/ping/padding-less "ack" packets) legitimately has a
-// different shape and is not passed to this helper by callers.
 func assertInitialFramesCryptoBeforePadding(t *testing.T, frames []string) {
 	t.Helper()
 	if len(frames) < 2 {
@@ -241,11 +207,6 @@ func assertInitialFramesCryptoBeforePadding(t *testing.T, frames []string) {
 	}
 }
 
-// assertTransportParameterOrder asserts the chrome-h3 transport-parameter
-// *set*: real Chrome reshuffles the parameter order on every handshake (see
-// third_party/quic-go/internal/wire/transport_parameters.go
-// marshalClientChromeH3), so a fixed relative order is not itself a valid
-// fingerprint target — only the parameter set is checked here.
 func assertTransportParameterOrder(t *testing.T, ids []uint64) {
 	t.Helper()
 	ids = stripGREASETransportParameterIDs(ids)
@@ -254,19 +215,19 @@ func assertTransportParameterOrder(t *testing.T, ids []uint64) {
 		present[id] = true
 	}
 	required := []uint64{
-		0x04,   // initial_max_data
-		0x05,   // initial_max_stream_data_bidi_local
-		0x06,   // initial_max_stream_data_bidi_remote
-		0x07,   // initial_max_stream_data_uni
-		0x08,   // initial_max_streams_bidi
-		0x09,   // initial_max_streams_uni
-		0x01,   // max_idle_timeout
-		0x03,   // max_udp_payload_size
-		0x0f,   // initial_source_connection_id
-		0x20,   // max_datagram_frame_size
-		0x11,   // version_information
-		0x3127, // google_initial_rtt
-		0x3128, // google_connection_options
+		0x04,
+		0x05,
+		0x06,
+		0x07,
+		0x08,
+		0x09,
+		0x01,
+		0x03,
+		0x0f,
+		0x20,
+		0x11,
+		0x3127,
+		0x3128,
 	}
 	for _, want := range required {
 		if !present[want] {
@@ -274,12 +235,12 @@ func assertTransportParameterOrder(t *testing.T, ids []uint64) {
 		}
 	}
 	forbidden := []uint64{
-		0x0a,             // ack_delay_exponent
-		0x0b,             // max_ack_delay
-		0x0c,             // disable_active_migration
-		0x0e,             // active_connection_id_limit
-		0x17f7586d2cb571, // reset_stream_at
-		0xff04de1b,       // min_ack_delay
+		0x0a,
+		0x0b,
+		0x0c,
+		0x0e,
+		0x17f7586d2cb571,
+		0xff04de1b,
 	}
 	for _, unwanted := range forbidden {
 		if present[unwanted] {

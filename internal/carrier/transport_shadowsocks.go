@@ -1,22 +1,5 @@
 //go:build chimera_ss
 
-// Shadowsocks-AEAD carrier (ROADMAP2 §3): a 4th anti-censorship strategy,
-// deliberately NOT modeled on Reality/QUIC's "look like a real protocol"
-// approach. There is no TLS ClientHello, no QUIC framing -- the wire is an
-// ephemeral X25519 public key followed by a stream of AEAD-sealed chunks
-// that, to an observer, looks like arbitrary encrypted noise rather than
-// any known protocol. Positioning (see anticensorship_page.dart): minimal
-// overhead / highest throughput, at the cost of not being disguised as
-// anything specific.
-//
-// Honest compromise, documented rather than glossed over: unlike the TCP
-// carrier's steal-host splice (server.spliceConn) or Reality's TLS
-// takeover, an unauthenticated peer here gets no camouflage traffic at
-// all -- a failed handshake or auth check just closes the connection. An
-// active prober can therefore distinguish "something is listening but
-// doesn't respond like a known protocol" from a real closed port, which
-// Reality/QUIC specifically avoid. This is the class of tradeoff ROADMAP2
-// §0.1 п.3 asks to document rather than paper over.
 package carrier
 
 import (
@@ -48,16 +31,10 @@ func init() {
 }
 
 const (
-	ssWindowSeconds = 120 // matches internal/auth's anti-replay window
-	ssShortIDLen    = 4   // matches auth.ShortIDLen
+	ssWindowSeconds = 120
+	ssShortIDLen    = 4
 	ssMaxChunk      = 0x3FFF
 )
-
-// --- minimal HKDF-SHA256 (RFC 5869), duplicated from internal/auth rather
-// than imported, since it's a 15-line primitive and this file intentionally
-// stays decoupled from the TLS-handshake-specific auth package: the
-// Shadowsocks framing has nothing analogous to a ClientHello SessionID to
-// share code around. ---
 
 func ssHkdfExtract(salt, ikm []byte) []byte {
 	h := hmac.New(sha256.New, salt)
@@ -83,13 +60,9 @@ func ssDeriveKey(ss, salt []byte, info string) []byte {
 	return ssHkdfExpand(prk, []byte(info), 32)
 }
 
-// ssKeys holds the two direction-specific AEAD keys derived from one ECDH
-// shared secret -- separate keys per direction (rather than one key with a
-// disjoint nonce space) so nonce-uniqueness never depends on careful
-// counter-offset bookkeeping between directions.
 type ssKeys struct {
-	c2s cipher.AEAD // client -> server
-	s2c cipher.AEAD // server -> client
+	c2s cipher.AEAD
+	s2c cipher.AEAD
 }
 
 func newSSKeys(ss, serverPub []byte) (ssKeys, error) {
@@ -114,18 +87,12 @@ func ssNewGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// ssConn wraps a raw net.Conn with the AEAD-chunked framing: each chunk is
-// [AEAD-sealed 2-byte length][AEAD-sealed payload], nonces are a
-// monotonically incrementing 12-byte counter per direction (two AEAD
-// operations, hence two nonces, per chunk). This becomes the transport
-// tunnel.Session's own padded control-frame protocol rides on top of,
-// unchanged -- exactly like the plain-TCP and Reality-TLS builds.
 type ssConn struct {
 	net.Conn
-	sendAEAD, recvAEAD   cipher.AEAD
-	sendCounter          uint64
-	recvCounter          uint64
-	recvBuf              []byte // leftover decrypted payload not yet consumed by Read
+	sendAEAD, recvAEAD cipher.AEAD
+	sendCounter        uint64
+	recvCounter        uint64
+	recvBuf            []byte
 }
 
 func newSSConn(c net.Conn, sendAEAD, recvAEAD cipher.AEAD) *ssConn {
@@ -153,7 +120,6 @@ func (s *ssConn) open(aead cipher.AEAD, counter *uint64, sealed []byte) ([]byte,
 	return out, nil
 }
 
-// writeChunk sends one length-then-payload chunk pair.
 func (s *ssConn) writeChunk(payload []byte) error {
 	for len(payload) > 0 {
 		n := len(payload)
@@ -177,7 +143,6 @@ func (s *ssConn) writeChunk(payload []byte) error {
 	return nil
 }
 
-// readChunk reads and decrypts the next chunk, returning its plaintext.
 func (s *ssConn) readChunk() ([]byte, error) {
 	sealedLen := make([]byte, 2+s.recvAEAD.Overhead())
 	if _, err := io.ReadFull(s.Conn, sealedLen); err != nil {
@@ -218,10 +183,6 @@ func (s *ssConn) Write(p []byte) (int, error) {
 
 var errSSAuthRejected = errors.New("carrier: shadowsocks-aead: server rejected auth frame")
 
-// ssHandshakeClient performs the ephemeral-ECDH handshake and returns the
-// wrapped AEAD connection plus a tunnel.Session ready for
-// WriteConnect/WritePing, mirroring establish() in transport_plain.go /
-// transport_reality.go.
 func ssHandshakeClient(cfg Config) (*ssConn, *tunnel.Session, error) {
 	serverPub, err := keys.DecodePublic(cfg.PubB64)
 	if err != nil {
@@ -240,7 +201,7 @@ func ssHandshakeClient(cfg Config) (*ssConn, *tunnel.Session, error) {
 		return nil, nil, err
 	}
 
-	conn, err := net.Dial("tcp", cfg.Server)
+	conn, err := net.DialTimeout("tcp", cfg.Server, DialTimeout)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,9 +211,6 @@ func ssHandshakeClient(cfg Config) (*ssConn, *tunnel.Session, error) {
 	}
 	sc := newSSConn(conn, k.c2s, k.s2c)
 
-	// Auth frame: window || shortID, same anti-replay shape as
-	// internal/auth.Seal's plaintext, just carried as the first AEAD chunk
-	// instead of a ClientHello SessionID (there is no ClientHello here).
 	authFrame := make([]byte, 8+ssShortIDLen)
 	binary.BigEndian.PutUint64(authFrame[:8], uint64(time.Now().Unix()/ssWindowSeconds))
 	copy(authFrame[8:], ParseShortID(cfg.ShortIDHex))
@@ -261,11 +219,6 @@ func ssHandshakeClient(cfg Config) (*ssConn, *tunnel.Session, error) {
 		return nil, nil, err
 	}
 
-	// Capability token (ROADMAP2 §1), when set, rides the same raw AEAD-chunk
-	// layer as the auth frame above -- deliberately NOT tunnel.Session's
-	// WriteAuthToken/padding-frame layer, since that layer doesn't exist yet
-	// at this point (it starts once the handshake below is fully accepted),
-	// and mixing the two framings would desync the server's reader.
 	if cfg.Token != "" {
 		if err := sc.writeChunk([]byte(cfg.Token)); err != nil {
 			conn.Close()
@@ -399,7 +352,7 @@ func ssHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, allowlist
 	if err != nil {
 		return
 	}
-	// Server's view mirrors the client's: it receives on c2s, sends on s2c.
+
 	sc := newSSConn(c, k.s2c, k.c2s)
 
 	authFrame, err := sc.readChunk()
@@ -409,7 +362,7 @@ func ssHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, allowlist
 	window := binary.BigEndian.Uint64(authFrame[:8])
 	now := uint64(time.Now().Unix() / ssWindowSeconds)
 	if !(window == now || window+1 == now || window == now+1) {
-		return // outside the anti-replay window
+		return
 	}
 	shortID := authFrame[8:]
 
@@ -418,9 +371,7 @@ func ssHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, allowlist
 			return
 		}
 	} else {
-		// Mirrors the client's raw ssConn-chunk exchange in
-		// ssHandshakeClient -- see that function's comment on why this
-		// deliberately doesn't use tunnel.Session's own framing yet.
+
 		token, err := sc.readChunk()
 		if err != nil {
 			return
@@ -439,9 +390,6 @@ func ssHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, allowlist
 	ssServeTunnel(sc, sess)
 }
 
-// ssServeTunnel mirrors server.serveTunnel / internal/quic's serveTunnel --
-// each transport keeps its own tiny copy of this dispatch loop rather than
-// sharing one across packages, consistent with the existing TCP/QUIC split.
 func ssServeTunnel(rw io.ReadWriteCloser, sess *tunnel.Session) {
 	cmd, host, port, err := sess.ReadRequest(rw)
 	if err != nil {
@@ -451,7 +399,7 @@ func ssServeTunnel(rw io.ReadWriteCloser, sess *tunnel.Session) {
 		_ = sess.WriteStatus(rw, true)
 		return
 	}
-	target, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	target, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))), DialTimeout)
 	if err != nil {
 		_ = sess.WriteStatus(rw, false)
 		return

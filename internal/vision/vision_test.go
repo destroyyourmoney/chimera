@@ -12,7 +12,7 @@ func makeReader(b []byte) *bufio.Reader {
 }
 
 func TestClassify_TLS12ClientHello(t *testing.T) {
-	// Real TLS 1.2 ClientHello prefix: content-type=0x16, version=0x0301, len(2), handshake-type=0x01
+
 	raw := []byte{0x16, 0x03, 0x01, 0x00, 0xf1, 0x01, 0x00, 0x00}
 	if got := Classify(makeReader(raw)); got != FlowTLS {
 		t.Fatalf("expected FlowTLS, got %v", got)
@@ -20,7 +20,7 @@ func TestClassify_TLS12ClientHello(t *testing.T) {
 }
 
 func TestClassify_TLS13ClientHello(t *testing.T) {
-	// TLS 1.3 still uses legacy_version 0x0301 in the record header.
+
 	raw := []byte{0x16, 0x03, 0x01, 0x01, 0x00, 0x01}
 	if got := Classify(makeReader(raw)); got != FlowTLS {
 		t.Fatalf("expected FlowTLS, got %v", got)
@@ -45,7 +45,7 @@ func TestClassify_DoesNotConsumeBytes(t *testing.T) {
 	raw := []byte("GET / HTTP/1.1\r\n")
 	br := makeReader(raw)
 	_ = Classify(br)
-	// All bytes should still be readable.
+
 	got, err := io.ReadAll(br)
 	if err != nil {
 		t.Fatal(err)

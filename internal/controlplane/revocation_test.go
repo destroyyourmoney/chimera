@@ -21,8 +21,6 @@ func TestRevocationSinceCursor(t *testing.T) {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
 
-	// Polling again from the returned etag sees nothing new -- this is the
-	// cursor behavior a data-plane server's poll loop depends on.
 	more, nextEtag, err := store.Since(etag)
 	if err != nil {
 		t.Fatalf("Since(etag): %v", err)

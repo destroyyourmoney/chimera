@@ -1,8 +1,3 @@
-// Support screen: export a redacted diagnostics report to attach to a
-// support request, plus a short note on where the operator/self-hosted
-// documentation lives. CHIMERA is self-hosted (bring-your-own-server, no
-// central account/subscription) so there's no "contact support" URL to
-// link -- the operator running the server is the point of contact.
 import 'package:flutter/material.dart';
 
 import 'chimera_service.dart';
@@ -16,17 +11,13 @@ class SupportPage extends StatefulWidget {
     required this.buildReport,
     this.state,
     this.downSamples = const [],
+    this.embedded = false,
   });
 
-  /// Builds the report text on demand (so it reflects the latest state at
-  /// export time, not whenever this screen was opened).
+  final bool embedded;
+
   final String Function() buildReport;
 
-  /// Live connection state for the throughput/endpoint-health section below
-  /// -- moved here from Home (ROADMAP2 redesign: the artifact's Home is just
-  /// the signal core + one server card + one latency pill, with no
-  /// per-endpoint RTT table or sparkline). Null/empty on a build that hasn't
-  /// wired a live tunnel yet.
   final ChimeraState? state;
   final List<double> downSamples;
 
@@ -63,98 +54,98 @@ class _SupportPageState extends State<SupportPage> {
     final tokens = Theme.of(context).extension<ChimeraTokens>()!;
     final state = widget.state;
     final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Support')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-        children: [
-          if (state != null && state.isConnected) ...[
-            _sectionLabel(tokens, 'Live connection'),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: tokens.surface2,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Theme.of(context).dividerColor),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _metric(
-                          context,
-                          tokens,
-                          label: 'UPLOAD',
-                          value: '${_fmtBytes(state.bytesUp)}/s',
-                        ),
+    final content = ListView(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+      children: [
+        if (state != null && state.isConnected) ...[
+          _sectionLabel(tokens, 'Live connection'),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: tokens.surface2,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Theme.of(context).dividerColor),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _metric(
+                        context,
+                        tokens,
+                        label: 'UPLOAD',
+                        value: '${_fmtBytes(state.bytesUp)}/s',
                       ),
-                      Expanded(
-                        child: _metric(
-                          context,
-                          tokens,
-                          label: 'DOWNLOAD',
-                          value: '${_fmtBytes(state.bytesDown)}/s',
-                        ),
+                    ),
+                    Expanded(
+                      child: _metric(
+                        context,
+                        tokens,
+                        label: 'DOWNLOAD',
+                        value: '${_fmtBytes(state.bytesDown)}/s',
                       ),
-                    ],
-                  ),
-                  if (widget.downSamples.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    SpeedSparkline(
-                      samples: widget.downSamples,
-                      color: scheme.primary,
                     ),
                   ],
+                ),
+                if (widget.downSamples.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  SpeedSparkline(
+                    samples: widget.downSamples,
+                    color: scheme.primary,
+                  ),
                 ],
-              ),
+              ],
             ),
-            if (state.endpoints.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              _sectionLabel(tokens, 'Endpoint health'),
-              const SizedBox(height: 8),
-              _endpointHealth(context, tokens, state),
-            ],
-            const SizedBox(height: 20),
+          ),
+          if (state.endpoints.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _sectionLabel(tokens, 'Endpoint health'),
+            const SizedBox(height: 8),
+            _endpointHealth(context, tokens, state),
           ],
-          Text(
-            'CHIMERA is self-hosted: there\'s no CHIMERA account or central '
-            'support desk. Whoever runs your server is your point of '
-            'contact -- share the diagnostics export below with them.',
-            style: TextStyle(
-              fontFamily: 'Plex Sans',
-              fontSize: 12.5,
-              color: tokens.textMuted,
-              height: 1.4,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'The export includes connection state, endpoint health, and '
-            'your settings -- server public keys and short IDs are blanked '
-            'out, they act as credentials.',
-            style: TextStyle(
-              fontFamily: 'Plex Sans',
-              fontSize: 12,
-              color: tokens.textFaint,
-              height: 1.35,
-            ),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: _exporting ? null : _export,
-              icon: const Icon(Icons.file_download_outlined, size: 18),
-              label: Text(
-                _exporting ? 'Exporting…' : 'Export diagnostics',
-              ),
-            ),
-          ),
+          const SizedBox(height: 20),
         ],
-      ),
+        Text(
+          'CHIMERA is self-hosted: there\'s no CHIMERA account or central '
+          'support desk. Whoever runs your server is your point of '
+          'contact -- share the diagnostics export below with them.',
+          style: TextStyle(
+            fontFamily: 'Plex Sans',
+            fontSize: 12.5,
+            color: tokens.textMuted,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'The export includes connection state, endpoint health, and '
+          'your settings -- server public keys and short IDs are blanked '
+          'out, they act as credentials.',
+          style: TextStyle(
+            fontFamily: 'Plex Sans',
+            fontSize: 12,
+            color: tokens.textFaint,
+            height: 1.35,
+          ),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _exporting ? null : _export,
+            icon: const Icon(Icons.file_download_outlined, size: 18),
+            label: Text(_exporting ? 'Exporting…' : 'Export diagnostics'),
+          ),
+        ),
+      ],
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Support')),
+      body: content,
     );
   }
 
@@ -218,10 +209,7 @@ class _SupportPageState extends State<SupportPage> {
             if (i > 0)
               Divider(height: 1, color: Theme.of(context).dividerColor),
             Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(
                 children: [
                   Container(

@@ -15,10 +15,6 @@ import (
 
 const serviceName = "ChimeraNetHelper"
 
-// chimeraService implements svc.Handler: it owns the nethelper.Server's TCP
-// listener for the service's whole lifetime, tearing the tunnel down (via
-// the nethelper.Server's Runner) on Stop/Shutdown so a `sc stop` or a
-// reboot never leaves routes/DNS/firewall rules behind.
 type chimeraService struct {
 	server *nethelper.Server
 }
@@ -61,7 +57,7 @@ loop:
 	}
 
 	cancel()
-	_ = s.server.Runner.Stop() // best-effort: restore OS network state before the service dies
+	_ = s.server.Runner.Stop()
 	status <- svc.Status{State: svc.Stopped}
 	return false, 0
 }

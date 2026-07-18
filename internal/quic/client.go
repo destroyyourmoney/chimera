@@ -23,10 +23,6 @@ import (
 
 const dialTimeout = 10 * time.Second
 
-// sessionCaches holds one TLS ClientSessionCache per server address. Keying by
-// address (not SNI) prevents cross-server ticket reuse: two CHIMERA servers with
-// the same SNI but different TLS certs don't share entries. This enables 0-RTT on
-// reconnect to the same server while keeping address-distinct caches isolated.
 var (
 	sessionCachesMu sync.Mutex
 	sessionCaches   = map[string]tls.ClientSessionCache{}
@@ -43,11 +39,6 @@ func sessionCacheFor(addr string) tls.ClientSessionCache {
 	return c
 }
 
-// DialConnect opens a QUIC carrier and requests a tunnel to host:port. The
-// returned conn is ready for bidirectional relay. If cfg.Shaping is true the
-// write path is wrapped in the H3-video traffic shaper (stealth envelope).
-// Registered as the QUIC dialer in carrier so the endpoint Pool and SOCKS
-// inbound use it transparently.
 func DialConnect(cfg carrier.Config, host string, port uint16) (net.Conn, error) {
 	sc, sess, err := establish(cfg)
 	if err != nil {
@@ -72,7 +63,6 @@ func DialConnect(cfg carrier.Config, host string, port uint16) (net.Conn, error)
 	return sc, nil
 }
 
-// Ping verifies the QUIC handshake + tunnel path end-to-end (client PoC).
 func Ping(cfg carrier.Config) error {
 	sc, sess, err := establish(cfg)
 	if err != nil {
@@ -93,32 +83,21 @@ func Ping(cfg carrier.Config) error {
 	return nil
 }
 
-// dial opens a QUIC connection to the server (no stream yet). Split out from
-// authStream so one connection can host several authenticated streams — needed
-// by the UDP-association multiplexer (udpclient.go), where many associations
-// share a single carrier connection and its datagram channel.
 func dial(cfg carrier.Config) (*quic.Conn, error) {
 	fp := resolveQUICFingerprint(cfg.Fp)
 	tlsConf := &tls.Config{
-		InsecureSkipVerify: true, // self-signed PoC cert; parity follow-up replaces this
+		InsecureSkipVerify: true,
 		NextProtos:         []string{fp.ALPN},
 		ServerName:         cfg.SNI,
-		// Per-address session cache enables 0-RTT on reconnect to the same server.
-		// Using cfg.Server as the cache key (not SNI) prevents cross-server ticket reuse.
+
 		ClientSessionCache: sessionCacheFor(cfg.Server),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
-	// DialAddrEarly sends 0-RTT data on a resumed session, saving one RTT on
-	// reconnect. On first connect (no cached ticket), it falls back to 1-RTT.
+
 	return quic.DialAddrEarly(ctx, cfg.Server, tlsConf, quicConfigForFingerprint(cfg.BandwidthBps, fp))
 }
 
-// authStream opens a new stream on conn and writes the auth preface (ephemeral
-// pub || sealed tag). The server authenticates every stream independently, so
-// each association/CONNECT opens its own authenticated stream. Returns the stream
-// as a net.Conn plus the per-session seeded-padding tunnel keyed by the shared
-// secret — identical inner protocol to the TCP carrier.
 func authStream(conn *quic.Conn, cfg carrier.Config) (*streamConn, *tunnel.Session, error) {
 	serverPub, err := keys.DecodePublic(cfg.PubB64)
 	if err != nil {
@@ -154,9 +133,6 @@ func authStream(conn *quic.Conn, cfg carrier.Config) (*streamConn, *tunnel.Sessi
 	return &streamConn{Stream: stream, conn: conn}, tunnel.ClientSession(ss), nil
 }
 
-// establish performs the QUIC stealth handshake for a single stream: it dials the
-// server, then opens an authenticated stream. Returns the stream as a net.Conn
-// plus the per-session seeded-padding tunnel.
 func establish(cfg carrier.Config) (*streamConn, *tunnel.Session, error) {
 	conn, err := dial(cfg)
 	if err != nil {

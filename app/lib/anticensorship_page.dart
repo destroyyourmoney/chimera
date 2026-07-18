@@ -1,11 +1,3 @@
-// Global anti-censorship transport picker (ROADMAP2 §3/§4): one of 4 real
-// carrier strategies. Speed/stealth bars are editorial honesty, not
-// marketing -- Shadowsocks-AEAD is shown with a low stealth score and an
-// explicit "looks like random noise" caveat instead of being sold as
-// undetectable (§0's "no false promises" applies to UI copy, not just docs).
-// Persists to `ChimeraSettings.obfuscationMode`, replacing the old per-server
-// `transport-mode` field as the default (a saved BYO link's own mode still
-// wins for that server, see settings_store.dart's ObfuscationMode doc).
 import 'package:flutter/material.dart';
 
 import 'settings_store.dart';
@@ -73,20 +65,14 @@ class AnticensorshipPage extends StatefulWidget {
     required this.current,
     required this.onChanged,
     this.availableTransportParams,
+    this.embedded = false,
   });
 
   final ObfuscationMode current;
   final Future<void> Function(ObfuscationMode mode) onChanged;
 
-  /// The `obfuscationModeQueryParam` values (`''` for Reality, else
-  /// `quic`/`ss`/`dot`) the currently selected server actually has a
-  /// listener for (ROADMAP2 §3/§4 multi-transport support -- see
-  /// `CatalogServer.availableTransportParams`). Null means "unknown /
-  /// no server selected yet, or a BYO link with no recorded listeners" --
-  /// every transport stays selectable rather than guessing. A non-null set
-  /// disables (dims, un-tappable) any card not in it: picking a transport
-  /// this server can't actually serve would just silently fail to connect,
-  /// which is exactly the false promise ROADMAP2 §0 rules out.
+  final bool embedded;
+
   final Set<String>? availableTransportParams;
 
   @override
@@ -111,23 +97,31 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<ChimeraTokens>()!;
+    final content = SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        children: _transports
+            .map(
+              (t) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _transportCard(context, tokens, t),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (widget.embedded) return content;
     return Scaffold(
       appBar: AppBar(title: const Text('Anti-censorship')),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-          children: _transports
-              .map((t) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _transportCard(context, tokens, t),
-                  ))
-              .toList(),
-        ),
-      ),
+      body: content,
     );
   }
 
-  Widget _transportCard(BuildContext context, ChimeraTokens tokens, _TransportSpec t) {
+  Widget _transportCard(
+    BuildContext context,
+    ChimeraTokens tokens,
+    _TransportSpec t,
+  ) {
     final isSelected = _selected == t.mode;
     final isAvailable = _isAvailable(t.mode);
     final scheme = Theme.of(context).colorScheme;
@@ -145,7 +139,9 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
               color: isSelected ? tokens.accentSoft : tokens.surface2,
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
-                color: isSelected ? scheme.primary : Theme.of(context).dividerColor,
+                color: isSelected
+                    ? scheme.primary
+                    : Theme.of(context).dividerColor,
               ),
             ),
             child: Column(
@@ -164,7 +160,9 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
                       ),
                     ),
                     Icon(
-                      isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
                       size: 18,
                       color: isSelected ? scheme.primary : tokens.textFaint,
                     ),
@@ -185,9 +183,13 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    Expanded(child: _meter(context, tokens, 'Speed', t.speedPct)),
+                    Expanded(
+                      child: _meter(context, tokens, 'Speed', t.speedPct),
+                    ),
                     const SizedBox(width: 14),
-                    Expanded(child: _meter(context, tokens, 'Stealth', t.stealthPct)),
+                    Expanded(
+                      child: _meter(context, tokens, 'Stealth', t.stealthPct),
+                    ),
                   ],
                 ),
               ],
@@ -198,13 +200,22 @@ class _AnticensorshipPageState extends State<AnticensorshipPage> {
     );
   }
 
-  Widget _meter(BuildContext context, ChimeraTokens tokens, String label, int pct) {
+  Widget _meter(
+    BuildContext context,
+    ChimeraTokens tokens,
+    String label,
+    int pct,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label.toUpperCase(),
-          style: monoStyle(fontSize: 9.5, weight: FontWeight.w600, color: tokens.textFaint),
+          style: monoStyle(
+            fontSize: 9.5,
+            weight: FontWeight.w600,
+            color: tokens.textFaint,
+          ),
         ),
         const SizedBox(height: 4),
         ClipRRect(

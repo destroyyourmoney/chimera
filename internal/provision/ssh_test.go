@@ -9,7 +9,6 @@ import (
 	"chimera/internal/subscription"
 )
 
-// fakeRunner records the script it received and returns a canned output.
 type fakeRunner struct {
 	gotScript string
 	out       string
@@ -39,7 +38,6 @@ func TestDeploy_BuildsLinkAndSignedSubscription(t *testing.T) {
 		t.Fatalf("expected 1 link, got %d", len(res.Links))
 	}
 
-	// The link must round-trip and carry the deployed pub/host/sid.
 	p, err := link.Parse(res.Links[0])
 	if err != nil {
 		t.Fatalf("parse link: %v", err)
@@ -51,7 +49,6 @@ func TestDeploy_BuildsLinkAndSignedSubscription(t *testing.T) {
 		t.Fatalf("SNI not derived from steal-host: %q", p.Sni)
 	}
 
-	// The subscription must be valid and verify under the operator key.
 	if !strings.HasPrefix(res.Subscription, "#!chimera-subscription-v1\n# sig: ") {
 		t.Fatalf("subscription not signed:\n%s", res.Subscription)
 	}
@@ -67,18 +64,18 @@ func TestDeploy_ScriptKeepsPrivateKeyServerSide(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 	s := fr.gotScript
-	// PRIV must only ever live in a shell var; it must never be echoed back.
+
 	if strings.Contains(s, "echo \"CHIMERA_PUB=$PRIV") {
 		t.Fatal("script leaks private key")
 	}
 	if !strings.Contains(s, pubMarker+"$PUB") {
 		t.Fatal("script does not emit public key marker")
 	}
-	// Build must use the stealth+QUIC tags.
+
 	if !strings.Contains(s, "TAGS='"+serverBuildTags+"'") {
 		t.Fatalf("script missing server build tags:\n%s", s)
 	}
-	// Both TCP and UDP (QUIC) ports must be published.
+
 	if !strings.Contains(s, "443:443/tcp") || !strings.Contains(s, "443:443/udp") {
 		t.Fatal("script does not publish both tcp and udp")
 	}
@@ -147,7 +144,7 @@ func TestDeploy_ExtraListenersLaunchOneContainerEach(t *testing.T) {
 	}
 
 	s := fr.gotScript
-	// Each extra listener gets its own container name and -transport flag.
+
 	for _, tc := range []struct{ container, transport, port string }{
 		{"chimera-server-quic", "quic", "8443"},
 		{"chimera-server-ss", "ss", "8444"},
@@ -163,13 +160,11 @@ func TestDeploy_ExtraListenersLaunchOneContainerEach(t *testing.T) {
 			t.Errorf("script missing port mapping for %s:\n%s", tc.port, s)
 		}
 	}
-	// The primary listener must NOT get a -transport flag (preserves the
-	// binary's own default / backward compatibility with pre-multi-transport
-	// deploys).
+
 	if strings.Contains(s, "':' server -listen :443 -transport") {
 		t.Fatal("primary listener should not pass -transport")
 	}
-	// All listeners share exactly one generated keypair.
+
 	if strings.Count(s, "docker run --rm") != 1 {
 		t.Fatalf("expected exactly one keygen invocation, script:\n%s", s)
 	}
@@ -205,7 +200,7 @@ func TestDeploy_RejectsDuplicatePorts(t *testing.T) {
 	_, err := d.Deploy(context.Background(), DeploySpec{
 		Host: "1.2.3.4",
 		ExtraListeners: []ListenerSpec{
-			{Transport: "quic", Port: 443}, // collides with the primary's default 443
+			{Transport: "quic", Port: 443},
 		},
 	})
 	if err == nil {
@@ -216,7 +211,7 @@ func TestDeploy_RejectsDuplicatePorts(t *testing.T) {
 		Host: "1.2.3.4",
 		ExtraListeners: []ListenerSpec{
 			{Transport: "quic", Port: 8443},
-			{Transport: "ss", Port: 8443}, // collides with the other extra
+			{Transport: "ss", Port: 8443},
 		},
 	})
 	if err == nil {
@@ -236,9 +231,7 @@ func TestDeploy_RejectsInvalidExtraPort(t *testing.T) {
 }
 
 func TestDeploy_NoExtraListenersMatchesPreExistingScriptExactly(t *testing.T) {
-	// Pinning this guards against a regression where the multi-listener loop
-	// refactor changes the primary listener's script for the common
-	// (single-transport) case that predates this feature.
+
 	fr := &fakeRunner{out: "CHIMERA_PUB=pub\n"}
 	d := &SSHDeployer{Runner: fr}
 	if _, err := d.Deploy(context.Background(), DeploySpec{Host: "1.2.3.4"}); err != nil {
@@ -269,10 +262,7 @@ func TestDeploy_LabelsContainerAndSelfHealsPortConflict(t *testing.T) {
 	if !strings.Contains(s, "--label 'io.chimera.managed=true'") {
 		t.Fatalf("script does not label the container:\n%s", s)
 	}
-	// The port pre-check must attempt a label+publish-scoped self-heal
-	// before giving up with portInUseMarker -- see script.go's step 0 doc
-	// comment on why (redeploying to a host whose own prior CHIMERA
-	// container still holds the port must not be treated as a conflict).
+
 	if !strings.Contains(s, "label=io.chimera.managed=true") ||
 		!strings.Contains(s, "publish=443") {
 		t.Fatalf("script does not self-heal a stale CHIMERA container on the port:\n%s", s)

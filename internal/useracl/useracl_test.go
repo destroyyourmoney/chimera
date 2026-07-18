@@ -13,8 +13,6 @@ func TestAddAllowRemove(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	// No users provisioned yet: everything is rejected (unlike StaticAllowlist,
-	// an empty dynamic store must not default to accept-any).
 	if s.Allowed(make([]byte, 4)) {
 		t.Fatal("empty store must reject, not accept-any")
 	}

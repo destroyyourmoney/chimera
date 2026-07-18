@@ -1,18 +1,3 @@
-// Command chimera-control-cli is the operator's terminal-only interface to
-// the control-plane's admin API (ROADMAP2 §2). Deliberately CLI-only, not a
-// GUI or a mode of the Flutter client -- see ROADMAP2 §2's reasoning: this
-// is where account keys and the server catalog get managed, and that's a
-// smaller attack surface kept off any binary distributed to end users.
-//
-//	chimera-control-cli account create -expires 2027-01-01T00:00:00Z -device-limit 5
-//	chimera-control-cli account revoke -number 7K2M-9PQR-4TZS-XW3H
-//	chimera-control-cli account remove-devices -number 7K2M-9PQR-4TZS-XW3H
-//	chimera-control-cli catalog add -host vps.example.com -port 443 -pubkey B64KEY -sni www.microsoft.com -country Sweden -city Stockholm
-//	chimera-control-cli catalog remove -id 3
-//	chimera-control-cli catalog list
-//	chimera-control-cli catalog add-listener -server-id 3 -transport quic -port 8443
-//	chimera-control-cli catalog remove-listener -server-id 3 -transport quic
-//	chimera-control-cli revoke -sid a1b2c3d4
 package main
 
 import (
@@ -23,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 var (
@@ -36,10 +22,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Global flags (-admin-addr/-admin-token) may appear before or after the
-	// subcommand; scan for and strip them so the same flag set works either
-	// way, e.g. both `cli -admin-addr X account create` and
-	// `cli account create -admin-addr X`.
 	args := extractGlobalFlags(os.Args[1:])
 	if len(args) == 0 {
 		usage()
@@ -80,9 +62,6 @@ func envOr(key, def string) string {
 	return def
 }
 
-// extractGlobalFlags pulls -admin-addr/-admin-token out of argv (wherever
-// they appear) into globalAddr/globalTok and returns the remaining
-// positional args unchanged.
 func extractGlobalFlags(argv []string) []string {
 	var out []string
 	for i := 0; i < len(argv); i++ {
@@ -142,10 +121,35 @@ func mustOK(body []byte, status int, err error) []byte {
 
 func accountCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke|remove-devices> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|status|revoke|remove-devices> ...")
 		os.Exit(2)
 	}
 	switch args[0] {
+	case "status":
+		fs := flag.NewFlagSet("account status", flag.ExitOnError)
+		number := fs.String("number", "", "account number to check (required)")
+		fs.Parse(args[1:])
+		if *number == "" {
+			fmt.Fprintln(os.Stderr, "error: -number is required")
+			os.Exit(2)
+		}
+		body := mustOK(adminRequest("POST", "/v1/admin/accounts/status", map[string]any{"account_number": *number}))
+		var resp struct {
+			Status      string `json:"status"`
+			ExpiresAt   int64  `json:"expires_at"`
+			DeviceCount int    `json:"device_count"`
+			DeviceLimit int    `json:"device_limit"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			fmt.Fprintln(os.Stderr, "error: unexpected response:", string(body))
+			os.Exit(1)
+		}
+		fmt.Printf(
+			"status: %s\nexpires_at: %s\ndevices: %d/%d\n",
+			resp.Status,
+			time.Unix(resp.ExpiresAt, 0).UTC().Format(time.RFC3339),
+			resp.DeviceCount, resp.DeviceLimit,
+		)
 	case "create":
 		fs := flag.NewFlagSet("account create", flag.ExitOnError)
 		expires := fs.String("expires", "", "RFC3339 expiry, e.g. 2027-01-01T00:00:00Z (required)")
@@ -196,7 +200,7 @@ func accountCmd(args []string) {
 		}
 		fmt.Printf("removed %d device(s), revoked short IDs: %v\n", resp.RemovedCount, resp.ShortIDs)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|revoke|remove-devices> ...")
+		fmt.Fprintln(os.Stderr, "usage: chimera-control-cli account <create|status|revoke|remove-devices> ...")
 		os.Exit(2)
 	}
 }

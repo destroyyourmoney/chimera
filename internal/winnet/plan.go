@@ -1,8 +1,3 @@
-// Package winnet prepares Windows OS networking around a CHIMERA Wintun device.
-//
-// The package deliberately separates planning from applying: tests assert the
-// generated PowerShell without needing administrator rights, while the real CLI
-// can execute the same script from an elevated process.
 package winnet
 
 import (
@@ -21,18 +16,15 @@ const (
 	FirewallGroup         = "CHIMERA killswitch"
 )
 
-// Config describes the OS-side Windows full-tunnel setup.
 type Config struct {
 	InterfaceAlias string
 	AddressCIDR    string
 	DNS            []string
-	Endpoints      []string // host:port, hostname, or IP; resolved before route takeover
-	Firewall       bool     // install CHIMERA-owned Windows Firewall DNS leak guard
-	Killswitch     bool     // block ALL outbound traffic except the TUN interface, resolved endpoints, and loopback
+	Endpoints      []string
+	Firewall       bool
+	Killswitch     bool
 }
 
-// ElevatePowerShell renders a small launcher that re-runs the current command
-// through the Windows UAC prompt and waits for the elevated child to exit.
 func ElevatePowerShell(exe string, args []string) (string, error) {
 	exe = strings.TrimSpace(exe)
 	if exe == "" {
@@ -60,7 +52,6 @@ func ElevatePowerShell(exe string, args []string) (string, error) {
 	return b.String(), nil
 }
 
-// Normalize fills defaults and canonicalizes list fields.
 func (c Config) Normalize() Config {
 	if strings.TrimSpace(c.InterfaceAlias) == "" {
 		c.InterfaceAlias = DefaultInterfaceAlias
@@ -75,12 +66,6 @@ func (c Config) Normalize() Config {
 	return c
 }
 
-// PowerShell renders an idempotent-ish ActiveStore script:
-//   - capture endpoint routes before default-route takeover,
-//   - set the Wintun address and optional DNS,
-//   - add /1 split-default routes through the Wintun interface,
-//   - pin endpoint /32 routes back to their original interface/next-hop.
-//   - optionally block DNS leaks on currently active non-TUN interfaces.
 func PowerShell(c Config) (string, error) {
 	c = c.Normalize()
 	addr, err := netip.ParsePrefix(c.AddressCIDR)
@@ -98,25 +83,9 @@ func PowerShell(c Config) (string, error) {
 	b.WriteString("$ErrorActionPreference = 'Stop'\n")
 	b.WriteString("$ifAlias = " + psQuote(c.InterfaceAlias) + "\n")
 	b.WriteString("$endpointNames = @(" + psArray(c.Endpoints) + ")\n")
-	// $fwGroup must be defined unconditionally (not just when c.Firewall is
-	// set): the killswitch block below also references it, and with
-	// $ErrorActionPreference='Stop' a reference to an undefined variable used
-	// as -Group $null on New-NetFirewallRule throws mid-script, aborting
-	// before Set-NetFirewallProfile -DefaultOutboundAction Block's allow-list
-	// rules get created -- or, worse, aborting a later Restore run before it
-	// resets DefaultOutboundAction back to NotConfigured, leaving all
-	// outbound traffic blocked even after Disconnect.
+
 	b.WriteString("$fwGroup = " + psQuote(FirewallGroup) + "\n")
-	// Clear any /1 split-default routes left over from a previous session
-	// (chimera-helper always passes -setup-keep, so a crashed/killed tunnel
-	// leaves these in place) BEFORE resolving endpoint routes below. Doing
-	// this after the Find-NetRoute capture instead is the bug that caused a
-	// self-referencing route: with the stale /1s still active, Find-NetRoute
-	// resolves the VPN server's own IP through the TUN device (NextHop
-	// 0.0.0.0) rather than the physical gateway, so the "original route"
-	// pinned back for the server points right back into the tunnel --
-	// packets to the server go out, but nothing can route back in (matches
-	// "upload nonzero, download stuck at zero").
+
 	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
 	b.WriteString("Get-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue\n")
 	b.WriteString("$endpointRoutes = @()\n")
@@ -126,10 +95,7 @@ func PowerShell(c Config) (string, error) {
 	b.WriteString("  if ([System.Net.IPAddress]::TryParse($name, [ref]$parsed) -and $parsed.AddressFamily -eq 'InterNetwork') { $ips += $parsed.IPAddressToString }\n")
 	b.WriteString("  else { $ips += [System.Net.Dns]::GetHostAddresses($name) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString } }\n")
 	b.WriteString("  foreach ($ip in $ips) {\n")
-	// Get-NetRoute has no -RemoteIPAddress parameter (that's Find-NetRoute,
-	// which resolves the route Windows would actually pick for a
-	// destination); Find-NetRoute pipes back a mixed MSFT_NetIPAddress +
-	// MSFT_NetRoute pair, so the route object is picked out by CIM class.
+
 	b.WriteString("    $r = Find-NetRoute -RemoteIPAddress $ip -ErrorAction SilentlyContinue | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_NetRoute' } | Select-Object -First 1\n")
 	b.WriteString("    if ($null -ne $r) { $endpointRoutes += [pscustomobject]@{ IP = $ip; InterfaceIndex = $r.InterfaceIndex; NextHop = $r.NextHop } }\n")
 	b.WriteString("  }\n")
@@ -143,12 +109,7 @@ func PowerShell(c Config) (string, error) {
 	if len(c.DNS) > 0 {
 		b.WriteString("Set-DnsClientServerAddress -InterfaceAlias $ifAlias -ServerAddresses @(" + psArray(c.DNS) + ")\n")
 	}
-	// The stale /1 routes were already removed above (before the endpoint
-	// capture loop); re-adding them here just needs to tolerate "already
-	// exists" (Windows error 87) with -ErrorAction SilentlyContinue instead
-	// of letting $ErrorActionPreference='Stop' kill the whole plan (and with
-	// it the just-started chimera.exe tun process) if anything re-creates
-	// them concurrently.
+
 	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
 	b.WriteString("New-NetRoute -InterfaceAlias $ifAlias -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null\n")
 	b.WriteString("foreach ($r in $endpointRoutes) {\n")
@@ -167,12 +128,7 @@ func PowerShell(c Config) (string, error) {
 		b.WriteString("}\n")
 	}
 	if c.Killswitch {
-		// Default-deny outbound on every profile, then explicitly allow only:
-		// loopback, the CHIMERA TUN interface itself, and the resolved
-		// endpoint IPs (any port -- a reconnect/failover may use a different
-		// port than the one the route-pin loop above captured). Anything
-		// else -- direct egress from any other app/interface -- is dropped
-		// at the OS level regardless of what the Go carrier is doing.
+
 		b.WriteString("Set-NetFirewallProfile -All -DefaultOutboundAction Block\n")
 		b.WriteString("New-NetFirewallRule -DisplayName 'CHIMERA killswitch allow loopback' -Group $fwGroup -Direction Outbound -Action Allow -Enabled True -Profile Any -RemoteAddress 127.0.0.0/8 | Out-Null\n")
 		b.WriteString("New-NetFirewallRule -DisplayName 'CHIMERA killswitch allow TUN' -Group $fwGroup -Direction Outbound -Action Allow -Enabled True -Profile Any -InterfaceAlias $ifAlias | Out-Null\n")
@@ -183,8 +139,6 @@ func PowerShell(c Config) (string, error) {
 	return b.String(), nil
 }
 
-// RestorePowerShell removes the CHIMERA-owned interface address, DNS override,
-// split-default routes, endpoint pins, and optional firewall rules.
 func RestorePowerShell(c Config) (string, error) {
 	c = c.Normalize()
 	var b strings.Builder
@@ -192,21 +146,9 @@ func RestorePowerShell(c Config) (string, error) {
 	b.WriteString("$ifAlias = " + psQuote(c.InterfaceAlias) + "\n")
 	b.WriteString("$endpointNames = @(" + psArray(c.Endpoints) + ")\n")
 	b.WriteString("$fwGroup = " + psQuote(FirewallGroup) + "\n")
-	// Restore is the recovery path and must claw back everything it can even
-	// if the TUN adapter itself is already gone (device removed, driver
-	// reset, etc.) -- previously Get-NetAdapter with -ErrorAction Stop ran
-	// first, so throwing here (which it does whenever the adapter is
-	// missing) skipped every step below it: the firewall leak-guard rules,
-	// the killswitch's DefaultOutboundAction reset, and the endpoint /32 pin
-	// cleanup all silently never ran, leaving the machine's egress blocked
-	// or routed through pins that no longer resolve anywhere. Everything
-	// that doesn't require the adapter to exist now runs unconditionally
-	// first; only the interface-scoped route/IP/DNS cleanup is skipped if
-	// the adapter is truly gone (nothing to clean up there in that case).
+
 	b.WriteString("Get-NetFirewallRule -Group $fwGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n")
-	// Always clear a killswitch default-outbound override on restore, even if
-	// this particular Config didn't request one -- restore is the recovery
-	// path and must never leave the machine's egress blocked by accident.
+
 	b.WriteString("Set-NetFirewallProfile -All -DefaultOutboundAction NotConfigured\n")
 	b.WriteString("foreach ($name in $endpointNames) {\n")
 	b.WriteString("  $ips = @()\n")
@@ -225,9 +167,6 @@ func RestorePowerShell(c Config) (string, error) {
 	return b.String(), nil
 }
 
-// CheckPowerShell renders assertions for the CHIMERA Windows full-tunnel setup.
-// It exits non-zero when the interface, address, DNS, or split-default routes are
-// missing. Endpoint pins are checked when endpoints are provided.
 func CheckPowerShell(c Config) (string, error) {
 	c = c.Normalize()
 	addr, err := netip.ParsePrefix(c.AddressCIDR)

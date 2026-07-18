@@ -14,8 +14,6 @@ import (
 	"chimera/internal/carrier"
 )
 
-// startUDPEcho starts a UDP echo server and returns its host and port. Each
-// received datagram is echoed back to its sender verbatim.
 func startUDPEcho(t *testing.T) (host string, port uint16) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -38,10 +36,6 @@ func startUDPEcho(t *testing.T) (host string, port uint16) {
 	return h, uint16(pn)
 }
 
-// TestQUICUDPAssocEcho proves the full client↔server UDP datagram path end to end
-// over the QUIC carrier: OpenAssoc → Send → (server forwards to a real UDP echo
-// server) → server relays the echo back as a QUIC datagram → Receive. This
-// exercises the FEC framing in BOTH directions on a live connection.
 func TestQUICUDPAssocEcho(t *testing.T) {
 	addr, pub := startServer(t)
 	echoHost, echoPort := startUDPEcho(t)
@@ -77,9 +71,6 @@ func TestQUICUDPAssocEcho(t *testing.T) {
 	}
 }
 
-// TestQUICUDPAssocManyDatagrams drives enough datagrams through the association to
-// trigger FEC group/parity emission and the periodic loss-feedback frames in both
-// directions, confirming the steady-state datagram path stays correct under volume.
 func TestQUICUDPAssocManyDatagrams(t *testing.T) {
 	addr, pub := startServer(t)
 	echoHost, echoPort := startUDPEcho(t)
@@ -96,7 +87,6 @@ func TestQUICUDPAssocManyDatagrams(t *testing.T) {
 		t.Fatalf("open assoc: %v", err)
 	}
 
-	// Enough to cross lossReportInterval (64) so feedback frames flow both ways.
 	const count = 200
 	for i := 0; i < count; i++ {
 		msg := []byte(fmt.Sprintf("datagram-%d", i))
@@ -105,9 +95,6 @@ func TestQUICUDPAssocManyDatagrams(t *testing.T) {
 		}
 	}
 
-	// Collect echoes. On a loopback link there is no real loss, so every datagram
-	// should come back; allow a short drain window and a small tolerance for any
-	// reordering/scheduling slack.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	seen := map[string]bool{}

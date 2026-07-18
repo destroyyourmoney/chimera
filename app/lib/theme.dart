@@ -1,10 +1,3 @@
-// CHIMERA design system: color tokens, typography and themed widget
-// defaults shared by every screen. Colors mirror the approved mockup
-// exactly (see docs handoff) -- dark is the default/primary theme, light
-// is a fully-specified secondary. Extra semantic tokens that don't have a
-// slot in Material's ColorScheme (accent-soft, warn/warn-soft,
-// danger-soft, neutral-pill, text-faint) live in [ChimeraTokens], a
-// ThemeExtension registered on both ThemeDatas.
 import 'package:flutter/material.dart';
 
 @immutable
@@ -12,6 +5,7 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
   const ChimeraTokens({
     required this.accentSoft,
     required this.accentInk,
+    required this.accentText,
     required this.warn,
     required this.warnSoft,
     required this.dangerSoft,
@@ -20,10 +14,15 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
     required this.textMuted,
     required this.bgWash,
     required this.surface2,
+    required this.railTop,
+    required this.railBottom,
+    required this.heroWash,
   });
 
   final Color accentSoft;
   final Color accentInk;
+
+  final Color accentText;
   final Color warn;
   final Color warnSoft;
   final Color dangerSoft;
@@ -33,10 +32,16 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
   final Color bgWash;
   final Color surface2;
 
+  final Color railTop;
+  final Color railBottom;
+
+  final Color heroWash;
+
   @override
   ChimeraTokens copyWith({
     Color? accentSoft,
     Color? accentInk,
+    Color? accentText,
     Color? warn,
     Color? warnSoft,
     Color? dangerSoft,
@@ -45,10 +50,14 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
     Color? textMuted,
     Color? bgWash,
     Color? surface2,
+    Color? railTop,
+    Color? railBottom,
+    Color? heroWash,
   }) {
     return ChimeraTokens(
       accentSoft: accentSoft ?? this.accentSoft,
       accentInk: accentInk ?? this.accentInk,
+      accentText: accentText ?? this.accentText,
       warn: warn ?? this.warn,
       warnSoft: warnSoft ?? this.warnSoft,
       dangerSoft: dangerSoft ?? this.dangerSoft,
@@ -57,6 +66,9 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
       textMuted: textMuted ?? this.textMuted,
       bgWash: bgWash ?? this.bgWash,
       surface2: surface2 ?? this.surface2,
+      railTop: railTop ?? this.railTop,
+      railBottom: railBottom ?? this.railBottom,
+      heroWash: heroWash ?? this.heroWash,
     );
   }
 
@@ -66,6 +78,7 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
     return ChimeraTokens(
       accentSoft: Color.lerp(accentSoft, other.accentSoft, t)!,
       accentInk: Color.lerp(accentInk, other.accentInk, t)!,
+      accentText: Color.lerp(accentText, other.accentText, t)!,
       warn: Color.lerp(warn, other.warn, t)!,
       warnSoft: Color.lerp(warnSoft, other.warnSoft, t)!,
       dangerSoft: Color.lerp(dangerSoft, other.dangerSoft, t)!,
@@ -74,45 +87,70 @@ class ChimeraTokens extends ThemeExtension<ChimeraTokens> {
       textMuted: Color.lerp(textMuted, other.textMuted, t)!,
       bgWash: Color.lerp(bgWash, other.bgWash, t)!,
       surface2: Color.lerp(surface2, other.surface2, t)!,
+      railTop: Color.lerp(railTop, other.railTop, t)!,
+      railBottom: Color.lerp(railBottom, other.railBottom, t)!,
+      heroWash: Color.lerp(heroWash, other.heroWash, t)!,
     );
   }
 }
 
-// --- Dark theme tokens (default/primary) -----------------------------
-const _darkBg = Color(0xFF0C1512);
-const _darkBgWash = Color(0xFF0A110F);
-const _darkSurface = Color(0xFF121E19);
-const _darkSurface2 = Color(0xFF17251F);
-const _darkBorder = Color(0xFF223229);
-const _darkTextPrimary = Color(0xFFEAF2EE);
-const _darkTextMuted = Color(0xFF92A89D);
-const _darkTextFaint = Color(0xFF647A70);
-const _darkAccent = Color(0xFF49D6B3);
-const _darkAccentInk = Color(0xFF06231B);
-const _darkAccentSoft = Color(0xFF163C30);
-const _darkWarn = Color(0xFFE8B85A);
-const _darkWarnSoft = Color(0xFF3A2F16);
-const _darkDanger = Color(0xFFE2604F);
-const _darkDangerSoft = Color(0xFF3A1E18);
-const _darkNeutralPill = Color(0xFF223029);
+const _pacificDeep = Color(0xFF0B3D57);
+const _pacificCore = Color(0xFF0F6E8C);
+const _pacificMist = Color(0xFF2C86A6);
+const _pacificFoam = Color(0xFFBFE3EC);
+const _amberSignal = Color(0xFFE8A23D);
+const _coralFail = Color(0xFFE4573F);
 
-// --- Light theme tokens -----------------------------------------------
-const _lightBg = Color(0xFFEEF2F0);
-const _lightBgWash = Color(0xFFE4E9E6);
+abstract final class ChimeraPalette {
+  static const pacificDeep = _pacificDeep;
+  static const pacificCore = _pacificCore;
+  static const pacificMist = _pacificMist;
+  static const pacificFoam = _pacificFoam;
+  static const amberSignal = _amberSignal;
+  static const coralFail = _coralFail;
+}
+
+const _darkBg = Color(0xFF0A141C);
+const _darkBgWash = Color(0xFF081019);
+const _darkSurface = Color(0xFF0E2231);
+const _darkSurface2 = Color(0xFF12293B);
+const _darkBorder = Color(0xFF1E3A4D);
+const _darkTextPrimary = Color(0xFFE9F3F7);
+const _darkTextMuted = Color(0xFF8FABB9);
+const _darkTextFaint = Color(0xFF5C7A8B);
+const _darkAccent = _pacificCore;
+const _darkAccentInk = Color(0xFF04141B);
+const _darkAccentSoft = Color(0xFF123448);
+const _darkAccentText = _pacificFoam;
+const _darkWarn = _amberSignal;
+const _darkWarnSoft = Color(0xFF3A2C14);
+const _darkDanger = _coralFail;
+const _darkDangerSoft = Color(0xFF391D17);
+const _darkNeutralPill = Color(0xFF1A3244);
+const _darkRailTop = _pacificDeep;
+const _darkRailBottom = _darkBgWash;
+const _darkHeroWash = _pacificDeep;
+
+const _lightBg = Color(0xFFEEF3F4);
+const _lightBgWash = Color(0xFFE6EDEE);
 const _lightSurface = Color(0xFFFFFFFF);
-const _lightSurface2 = Color(0xFFEEF3F0);
-const _lightBorder = Color(0xFFD7E0DB);
-const _lightTextPrimary = Color(0xFF12201A);
-const _lightTextMuted = Color(0xFF5C6F66);
-const _lightTextFaint = Color(0xFF8A9B92);
-const _lightAccent = Color(0xFF17916F);
+const _lightSurface2 = Color(0xFFEAF1F4);
+const _lightBorder = Color(0xFFD5E2E6);
+const _lightTextPrimary = Color(0xFF0E2233);
+const _lightTextMuted = Color(0xFF4C6675);
+const _lightTextFaint = Color(0xFF7C97A3);
+const _lightAccent = _pacificCore;
 const _lightAccentInk = Color(0xFFFFFFFF);
-const _lightAccentSoft = Color(0xFFDCF0E8);
-const _lightWarn = Color(0xFFA3690F);
-const _lightWarnSoft = Color(0xFFF5E6CD);
+const _lightAccentSoft = Color(0xFFDCEDF3);
+const _lightAccentText = Color(0xFF0A5573);
+const _lightWarn = Color(0xFFA66A1E);
+const _lightWarnSoft = Color(0xFFF4E6D1);
 const _lightDanger = Color(0xFFB23A2B);
-const _lightDangerSoft = Color(0xFFF6E0DC);
-const _lightNeutralPill = Color(0xFFE4E9E6);
+const _lightDangerSoft = Color(0xFFF5E0DC);
+const _lightNeutralPill = Color(0xFFE2EAED);
+const _lightRailTop = Color(0xFFDCEBF1);
+const _lightRailBottom = _lightBgWash;
+const _lightHeroWash = Color(0xFFD3E8EE);
 
 const _fontSans = 'Plex Sans';
 
@@ -153,11 +191,15 @@ ThemeData _buildTheme({
   required Color accent,
   required Color accentInk,
   required Color accentSoft,
+  required Color accentText,
   required Color warn,
   required Color warnSoft,
   required Color danger,
   required Color dangerSoft,
   required Color neutralPill,
+  required Color railTop,
+  required Color railBottom,
+  required Color heroWash,
 }) {
   final colorScheme = ColorScheme(
     brightness: brightness,
@@ -304,6 +346,7 @@ ThemeData _buildTheme({
       ChimeraTokens(
         accentSoft: accentSoft,
         accentInk: accentInk,
+        accentText: accentText,
         warn: warn,
         warnSoft: warnSoft,
         dangerSoft: dangerSoft,
@@ -312,6 +355,9 @@ ThemeData _buildTheme({
         textMuted: textMuted,
         bgWash: bgWash,
         surface2: surface2,
+        railTop: railTop,
+        railBottom: railBottom,
+        heroWash: heroWash,
       ),
     ],
   );
@@ -330,11 +376,15 @@ final ThemeData chimeraDarkTheme = _buildTheme(
   accent: _darkAccent,
   accentInk: _darkAccentInk,
   accentSoft: _darkAccentSoft,
+  accentText: _darkAccentText,
   warn: _darkWarn,
   warnSoft: _darkWarnSoft,
   danger: _darkDanger,
   dangerSoft: _darkDangerSoft,
   neutralPill: _darkNeutralPill,
+  railTop: _darkRailTop,
+  railBottom: _darkRailBottom,
+  heroWash: _darkHeroWash,
 );
 
 final ThemeData chimeraLightTheme = _buildTheme(
@@ -350,36 +400,28 @@ final ThemeData chimeraLightTheme = _buildTheme(
   accent: _lightAccent,
   accentInk: _lightAccentInk,
   accentSoft: _lightAccentSoft,
+  accentText: _lightAccentText,
   warn: _lightWarn,
   warnSoft: _lightWarnSoft,
   danger: _lightDanger,
   dangerSoft: _lightDangerSoft,
   neutralPill: _lightNeutralPill,
+  railTop: _lightRailTop,
+  railBottom: _lightRailBottom,
+  heroWash: _lightHeroWash,
 );
 
-/// Named motion tokens shared by every screen (ROADMAP2 §4): connect/
-/// disconnect crossfades, list filtering, and page transitions all read off
-/// these instead of ad-hoc literal durations, so pacing stays consistent
-/// (and changeable in one place) as new screens land.
 abstract final class ChimeraMotion {
-  /// Small state toggles: favorite star, transport radio selection.
   static const fast = Duration(milliseconds: 120);
 
-  /// Default: connect/disconnect crossfade, status card recolor.
   static const standard = Duration(milliseconds: 220);
 
-  /// Page-level transitions (catalog <-> home, entry -> home).
   static const emphasized = Duration(milliseconds: 320);
 
   static const standardCurve = Curves.easeOutCubic;
   static const emphasizedCurve = Curves.easeOutCubic;
 }
 
-/// Custom page transition sharing [ChimeraMotion.emphasized]'s duration/curve
-/// -- a subtle fade + slide-up instead of Material's default platform
-/// transition, used for the account-key gate and catalog/anticensorship
-/// pushes so those flows feel like part of one system rather than default
-/// MaterialPageRoute chrome.
 class ChimeraPageRoute<T> extends PageRouteBuilder<T> {
   ChimeraPageRoute({required WidgetBuilder builder})
     : super(
@@ -406,9 +448,6 @@ class ChimeraPageRoute<T> extends PageRouteBuilder<T> {
       );
 }
 
-/// Monospace text style for protocol/measurement data (hosts, ports,
-/// throughput, RTT, transport labels) -- see design system split between
-/// Plex Sans (UI chrome) and Plex Mono (data).
 TextStyle monoStyle({
   double fontSize = 12,
   FontWeight weight = FontWeight.w400,

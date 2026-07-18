@@ -13,10 +13,6 @@ import (
 	"chimera/internal/tunnel"
 )
 
-// establish performs the default (no-uTLS) stealth handshake: it sends a
-// hand-rolled ClientHello carrying the auth tag and then speaks the inner
-// protocol over the post-handshake TCP stream. Returns the connection and the
-// per-session seeded-padding tunnel keyed by the shared secret.
 func establish(cfg Config) (net.Conn, *tunnel.Session, error) {
 	serverPub, err := keys.DecodePublic(cfg.PubB64)
 	if err != nil {
@@ -37,7 +33,7 @@ func establish(cfg Config) (net.Conn, *tunnel.Session, error) {
 	}
 	ch := clienthello.Active.BuildClientHello(cfg.SNI, tag, ephPub)
 
-	conn, err := net.Dial("tcp", cfg.Server)
+	conn, err := net.DialTimeout("tcp", cfg.Server, DialTimeout)
 	if err != nil {
 		return nil, nil, err
 	}

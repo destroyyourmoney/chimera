@@ -1,11 +1,3 @@
-// Package ratelimit is a per-key token-bucket limiter used to bound abuse of the
-// server's authentication crypto path (X25519 + AES-GCM per connection).
-//
-// Stealth note: being over the limit is NOT a wire-visible event. The server
-// treats a throttled connection exactly like any unauthenticated one — it is
-// spliced transparently to the steal-host. The limiter only decides whether to
-// spend CPU on the auth attempt, never how the connection looks on the wire, so
-// it adds no probing oracle.
 package ratelimit
 
 import (
@@ -18,17 +10,14 @@ type bucket struct {
 	last   time.Time
 }
 
-// Limiter is a thread-safe per-key token bucket. Keys are typically client IPs.
 type Limiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
-	rate    float64 // tokens refilled per second
-	burst   float64 // bucket capacity
+	rate    float64
+	burst   float64
 	now     func() time.Time
 }
 
-// New returns a Limiter refilling rate tokens/sec with the given burst capacity.
-// A non-positive rate disables limiting (Allow always returns true).
 func New(rate, burst float64) *Limiter {
 	return &Limiter{
 		buckets: make(map[string]*bucket),
@@ -38,10 +27,9 @@ func New(rate, burst float64) *Limiter {
 	}
 }
 
-// Allow consumes one token for key, returning true if a token was available.
 func (l *Limiter) Allow(key string) bool {
 	if l.rate <= 0 {
-		return true // limiting disabled
+		return true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -49,11 +37,11 @@ func (l *Limiter) Allow(key string) bool {
 	now := l.now()
 	b, ok := l.buckets[key]
 	if !ok {
-		// First sight: full bucket minus this request.
+
 		l.buckets[key] = &bucket{tokens: l.burst - 1, last: now}
 		return true
 	}
-	// Refill based on elapsed time, capped at burst.
+
 	b.tokens += now.Sub(b.last).Seconds() * l.rate
 	if b.tokens > l.burst {
 		b.tokens = l.burst
@@ -66,8 +54,6 @@ func (l *Limiter) Allow(key string) bool {
 	return false
 }
 
-// Cleanup evicts buckets idle for at least idle and refilled to capacity, so a
-// connection flood from many distinct IPs cannot grow the map without bound.
 func (l *Limiter) Cleanup(idle time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -79,7 +65,6 @@ func (l *Limiter) Cleanup(idle time.Duration) {
 	}
 }
 
-// Size reports the number of tracked keys (for tests and telemetry).
 func (l *Limiter) Size() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

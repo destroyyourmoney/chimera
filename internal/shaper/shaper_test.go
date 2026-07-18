@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// collectWriter collects all writes into a buffer under a mutex.
 type collectWriter struct {
 	mu  sync.Mutex
 	buf []byte
@@ -38,7 +37,7 @@ func TestShaper_AllBytesDelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	sw.Close()
-	time.Sleep(50 * time.Millisecond) // let shaper drain
+	time.Sleep(50 * time.Millisecond)
 
 	got := dst.Bytes()
 	if !bytes.Equal(got, payload) {
@@ -58,7 +57,6 @@ func TestShaper_BurstsDoNotExceedBurstSize(t *testing.T) {
 	cfg := ShapeConfig{BurstBytes: 512, BurstInterval: 20 * time.Millisecond}
 	sw := New(dst, cfg)
 
-	// Write more than one burst's worth.
 	_, _ = sw.Write(bytes.Repeat([]byte("a"), 2048))
 	time.Sleep(100 * time.Millisecond)
 	sw.Close()
@@ -74,7 +72,7 @@ func TestShaper_BurstsDoNotExceedBurstSize(t *testing.T) {
 
 func TestShaper_CloseFlushesAll(t *testing.T) {
 	dst := &collectWriter{}
-	sw := New(dst, ShapeConfig{BurstBytes: 1, BurstInterval: 1 * time.Hour}) // tiny burst, huge interval
+	sw := New(dst, ShapeConfig{BurstBytes: 1, BurstInterval: 1 * time.Hour})
 
 	payload := []byte("hello")
 	_, _ = sw.Write(payload)
@@ -101,11 +99,6 @@ func TestShaper_WriterImplementsIOWriter(t *testing.T) {
 	var _ io.Writer = New(io.Discard, DefaultConfig())
 }
 
-// TestShaper_BurstCadenceAndRate validates the on-wire profile: when fed far faster
-// than the configured rate, the shaper emits spaced bursts each ≤ BurstBytes at
-// ~BurstInterval cadence, and the sustained output rate is capped at
-// BurstBytes/BurstInterval (excess is held back, then drained on Close). This is the
-// "histograms ≈ H3-video, bounded rate" criterion as a deterministic unit test.
 func TestShaper_BurstCadenceAndRate(t *testing.T) {
 	type rec struct {
 		at time.Time
@@ -121,10 +114,9 @@ func TestShaper_BurstCadenceAndRate(t *testing.T) {
 
 	const burst = 4096
 	const interval = 20 * time.Millisecond
-	const window = 200 * time.Millisecond // ~10 burst windows
+	const window = 200 * time.Millisecond
 	sw := New(dst, ShapeConfig{BurstBytes: burst, BurstInterval: interval})
 
-	// Feed ~4 MB/s — 20× the 200 KB/s cap (burst/interval) — so the cap must engage.
 	feeder := time.NewTicker(2 * time.Millisecond)
 	deadline := time.After(window)
 feed:
@@ -145,8 +137,6 @@ feed:
 	sw.Close()
 	time.Sleep(40 * time.Millisecond)
 
-	// Cadence: roughly window/interval bursts emitted during the window (spaced),
-	// not one dump. Allow generous scheduling slack.
 	expected := int(window / interval)
 	if len(inWindow) < expected/2 {
 		t.Fatalf("too few bursts: got %d, want ≈%d (spaced cadence)", len(inWindow), expected)
@@ -155,7 +145,6 @@ feed:
 		t.Fatalf("too many bursts: got %d, want ≈%d (not interval-gated?)", len(inWindow), expected)
 	}
 
-	// Each in-window burst is rate-capped to ≤ BurstBytes.
 	var out int
 	for i, r := range inWindow {
 		if r.n > burst {
@@ -164,15 +153,13 @@ feed:
 		out += r.n
 	}
 
-	// Sustained output rate ≈ cap (burst/interval); must be far below the feed rate.
-	capRate := float64(burst) / interval.Seconds()             // 200 KB/s
+	capRate := float64(burst) / interval.Seconds()
 	gotRate := float64(out) / window.Seconds()
 	if gotRate > capRate*1.6 {
 		t.Fatalf("output rate %.0f B/s exceeds cap %.0f B/s (shaping not enforced)", gotRate, capRate)
 	}
 }
 
-// callbackWriter calls fn on each write.
 type callbackWriter struct {
 	fn func([]byte)
 }

@@ -1,13 +1,7 @@
-// Package healthreport pings a set of endpoints concurrently and reports
-// latency/error per endpoint. It exists as its own package (rather than
-// inline in cmd/chimera) so the collection/ordering/fastest-pick logic is
-// unit-testable without a real network dial -- cmd/chimera's healthCmd
-// supplies the real carrier.Ping as the ping func and only owns printing.
 package healthreport
 
 import "time"
 
-// Result is one endpoint's outcome. RTTMs is only meaningful when OK.
 type Result struct {
 	Server string `json:"server"`
 	OK     bool   `json:"ok"`
@@ -15,9 +9,6 @@ type Result struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// Run pings every host concurrently via ping and returns results in the same
-// order as hosts (not completion order), so callers can zip results back
-// against their input list.
 func Run(hosts []string, ping func(host string) error) []Result {
 	type indexed struct {
 		i int
@@ -47,8 +38,6 @@ func Run(hosts []string, ping func(host string) error) []Result {
 	return out
 }
 
-// Fastest returns the OK result with the lowest RTT, and false if none of
-// the results are OK.
 func Fastest(results []Result) (Result, bool) {
 	var best Result
 	found := false

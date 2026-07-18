@@ -19,11 +19,6 @@ import (
 const serviceDisplayName = "CHIMERA Network Helper"
 const serviceDescription = "Configures Windows network routing for the CHIMERA VPN tunnel. Only runs the tunnel setup a user explicitly requests from the CHIMERA tray app."
 
-// installService registers chimera-helper as an auto-start Windows service
-// (idempotent: safe to re-run if the service already exists, e.g. after an
-// app update), mints a fresh auth token, and starts it -- the one and only
-// UAC prompt this whole feature ever needs, triggered by the Flutter app's
-// "Enable full VPN protection" flow.
 func installService() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -42,9 +37,7 @@ func installService() error {
 
 	s, err := m.OpenService(serviceName)
 	if err == nil {
-		// Already installed (e.g. re-running install after an update):
-		// refresh the binary path in case the app moved, then fall through
-		// to (re)start below rather than erroring.
+
 		_ = s.Close()
 	} else {
 		s, err = m.CreateService(serviceName, exe, mgr.Config{
@@ -56,8 +49,7 @@ func installService() error {
 			return fmt.Errorf("create service: %w", err)
 		}
 		defer s.Close()
-		// Best-effort: restart on crash. Not fatal if unsupported/denied --
-		// the service still works, just without self-healing.
+
 		if err := s.SetRecoveryActions([]mgr.RecoveryAction{
 			{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
 			{Type: mgr.ServiceRestart, Delay: 15 * time.Second},
@@ -82,8 +74,7 @@ func installService() error {
 	defer s.Close()
 
 	if status, err := s.Query(); err == nil && status.State == svc.Running {
-		// A fresh token was just written; the running service must reload
-		// it, and a full restart is the simplest way to guarantee that.
+
 		if _, err := s.Control(svc.Stop); err != nil {
 			return fmt.Errorf("restart service (stop): %w", err)
 		}
@@ -101,8 +92,6 @@ func installService() error {
 	return nil
 }
 
-// uninstallService stops and removes the service and deletes its token, so
-// a later reinstall starts from a clean slate.
 func uninstallService() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -137,9 +126,6 @@ func uninstallService() error {
 	return nil
 }
 
-// printStatus is a debugging aid; the Flutter app determines service
-// availability by dialing it directly (see app/lib/nethelper_client.dart),
-// not by shelling out to this subcommand.
 func printStatus() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -197,9 +183,6 @@ func stateName(s svc.State) string {
 	}
 }
 
-// setupServiceLogging redirects the default slog logger to a file under
-// %ProgramData%\chimera\ -- once running under the Service Control Manager,
-// stdout/stderr go nowhere a developer can see them.
 func setupServiceLogging() {
 	dir := os.Getenv("ProgramData")
 	if dir == "" {

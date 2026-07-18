@@ -9,7 +9,6 @@ import (
 	"chimera/internal/endpoint"
 )
 
-// fakePool implements poolStats with controllable health.
 type fakePool struct {
 	stats []endpoint.Stat
 }
@@ -85,14 +84,14 @@ func TestMonitor_ConsecutiveResetOnRecovery(t *testing.T) {
 	cfg := Config{
 		CheckInterval:     10 * time.Millisecond,
 		BurnedThreshold:   0.5,
-		ConsecutiveBurned: 3, // requires 3 consecutive bad checks
+		ConsecutiveBurned: 3,
 	}
 	mon := NewMonitor(pool, cfg)
 
 	var fired atomic.Int32
 	mon.OnRotationNeeded(func(_ []BurnedEndpoint) {
 		fired.Add(1)
-		// After first hook fire, mark all endpoints healthy to reset consecutive.
+
 		pool.stats = allUp(3)
 	})
 
@@ -101,7 +100,6 @@ func TestMonitor_ConsecutiveResetOnRecovery(t *testing.T) {
 	go mon.Run(ctx)
 	<-ctx.Done()
 
-	// Should fire at most once since recovery resets the counter.
 	if fired.Load() > 1 {
 		t.Fatalf("rotation hook fired %d times (expected ≤ 1 after recovery reset)", fired.Load())
 	}

@@ -1,8 +1,3 @@
-// VPN settings screen: tiered network protection (off / DNS leak guard /
-// full killswitch) and custom DNS servers. Actual platform calls
-// (NetworkProtection.enable/disable) live in HomePage/_HomePageState -- this
-// screen is presentation-only and drives them via callbacks, matching the
-// rest of the settings screens.
 import 'package:flutter/material.dart';
 
 import 'settings_store.dart';
@@ -32,11 +27,7 @@ class VpnSettingsPage extends StatefulWidget {
 
 class _VpnSettingsPageState extends State<VpnSettingsPage> {
   late final TextEditingController _dnsCtrl;
-  // Mirrors widget.mode so a tap updates the radio tiles immediately: this
-  // page is pushed as its own route (Navigator.push), so a setState() up in
-  // HomePage after the mode actually changes can't reach back down into an
-  // already-built VpnSettingsPage -- only popping and re-pushing would pick
-  // up a new widget.mode. Local state makes the tiles reactive on their own.
+
   late NetworkProtectionMode _mode;
 
   @override
@@ -55,10 +46,7 @@ class _VpnSettingsPageState extends State<VpnSettingsPage> {
   Future<void> _setMode(NetworkProtectionMode v) async {
     final prev = _mode;
     setState(() => _mode = v);
-    // widget.onSetMode (HomePage._setNetworkProtection) actually engages the
-    // tunnel at the new tier and reports whether that succeeded -- revert
-    // the optimistic tile selection if it didn't, so the UI never claims a
-    // mode that isn't actually running.
+
     final ok = await widget.onSetMode(v);
     if (!ok && mounted) setState(() => _mode = prev);
   }

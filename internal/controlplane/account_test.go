@@ -81,12 +81,10 @@ func TestRedeemValidAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Redeem: %v", err)
 	}
-	if len(res.ShortIDHex) != 8 { // 4 bytes hex-encoded
+	if len(res.ShortIDHex) != 8 {
 		t.Fatalf("expected 8 hex chars short id, got %q", res.ShortIDHex)
 	}
 
-	// Re-redeeming the same device is idempotent: same short ID back, no
-	// new device row / no device-limit consumption.
 	res2, err := store.Redeem(number, devicePub)
 	if err != nil {
 		t.Fatalf("second Redeem: %v", err)
@@ -235,8 +233,6 @@ func TestRemoveAllDevices(t *testing.T) {
 		t.Fatalf("expected 0/2 after removal, got %d/%d", count, limit)
 	}
 
-	// The account itself must stay active/usable -- only its devices were
-	// cleared, unlike RevokeAccount.
 	if _, err := store.Redeem(number, "device-3"); err != nil {
 		t.Fatalf("expected the account to still accept a fresh redeem after RemoveAllDevices: %v", err)
 	}

@@ -6,8 +6,8 @@ import (
 )
 
 func TestEncoder_EmitsParityAfterGroup(t *testing.T) {
-	enc := NewEncoder(0) // loss=0 → maxGroupSize
-	enc.SetLoss(0.5)     // loss=50% → groupSize=2
+	enc := NewEncoder(0)
+	enc.SetLoss(0.5)
 
 	if _, parity := enc.AddData([]byte{0x01, 0x02, 0x03}); parity != nil {
 		t.Fatal("parity emitted too early (after 1 of 2 packets)")
@@ -25,7 +25,7 @@ func TestEncoder_EmitsParityAfterGroup(t *testing.T) {
 }
 
 func TestDecoder_RecoversErasedDataPacket(t *testing.T) {
-	enc := NewEncoder(0.5) // groupSize=2
+	enc := NewEncoder(0.5)
 	dec := NewDecoder(0)
 
 	pkt1 := []byte{0xAA, 0xBB, 0xCC}
@@ -37,7 +37,6 @@ func TestDecoder_RecoversErasedDataPacket(t *testing.T) {
 		t.Fatal("encoder did not emit parity")
 	}
 
-	// Simulate: pkt2's data frame is lost. Decoder gets pkt1 + parity → recovers pkt2.
 	if p, isData, rec := dec.Add(d1); !isData || !bytes.Equal(p, pkt1) || rec != nil {
 		t.Fatalf("data frame: got payload=%x isData=%v rec=%x", p, isData, rec)
 	}
@@ -63,7 +62,6 @@ func TestDecoder_RecoversErasedFirstPacket(t *testing.T) {
 	_, _ = enc.AddData(pkt1)
 	d2, parity := enc.AddData(pkt2)
 
-	// pkt1's data frame is lost; pkt2 + parity arrive.
 	dec.Add(d2)
 	_, _, recovered := dec.Add(parity)
 	if !bytes.Equal(recovered, pkt1) {
@@ -72,7 +70,7 @@ func TestDecoder_RecoversErasedFirstPacket(t *testing.T) {
 }
 
 func TestDecoder_NoFalseRecoveryWhenAllArrive(t *testing.T) {
-	enc := NewEncoder(0.5) // groupSize=2
+	enc := NewEncoder(0.5)
 	dec := NewDecoder(0)
 
 	d1, _ := enc.AddData([]byte{0x01, 0x02})
@@ -86,8 +84,8 @@ func TestDecoder_NoFalseRecoveryWhenAllArrive(t *testing.T) {
 }
 
 func TestDecoder_NoRecoveryWithTwoErasures(t *testing.T) {
-	enc := NewEncoder(0) // large group
-	enc.SetLoss(0.25)    // groupSize=4
+	enc := NewEncoder(0)
+	enc.SetLoss(0.25)
 	dec := NewDecoder(0)
 
 	var parity []byte
@@ -99,7 +97,7 @@ func TestDecoder_NoRecoveryWithTwoErasures(t *testing.T) {
 			parity = p
 		}
 	}
-	// Only 2 of 4 data frames arrive (two erasures) + parity → no recovery.
+
 	dec.Add(frames[0])
 	dec.Add(frames[1])
 	if _, _, rec := dec.Add(parity); rec != nil {
@@ -116,7 +114,6 @@ func TestDecoder_RecoversParityArrivingBeforeData(t *testing.T) {
 	d1, _ := enc.AddData(pkt1)
 	_, parity := enc.AddData(pkt2)
 
-	// Parity arrives first, then the surviving data frame → still recovers.
 	if _, _, rec := dec.Add(parity); rec != nil {
 		t.Fatalf("recovery before any data frame should be impossible, got %x", rec)
 	}
@@ -145,10 +142,10 @@ func TestGroupSizeFromLoss(t *testing.T) {
 }
 
 func TestEncoder_AdvancesGroupID(t *testing.T) {
-	enc := NewEncoder(0.5) // groupSize=2
+	enc := NewEncoder(0.5)
 	enc.AddData([]byte{0x01})
-	_, p1 := enc.AddData([]byte{0x02}) // completes group 0
-	d3, _ := enc.AddData([]byte{0x03}) // starts group 1
+	_, p1 := enc.AddData([]byte{0x02})
+	d3, _ := enc.AddData([]byte{0x03})
 	if p1 == nil {
 		t.Fatal("group 0 parity not emitted")
 	}
@@ -158,13 +155,12 @@ func TestEncoder_AdvancesGroupID(t *testing.T) {
 }
 
 func TestDecoder_LossEstimate(t *testing.T) {
-	// Every group of N=4 loses exactly one packet → observed loss should
-	// converge to ~1/4 = 0.25.
+
 	dec := NewDecoder(0)
 	const groups = 40
 	for g := 0; g < groups; g++ {
 		enc := NewEncoder(0)
-		enc.SetLoss(0.25) // groupSize=4
+		enc.SetLoss(0.25)
 		var frames [][]byte
 		var parity []byte
 		for i := 0; i < 4; i++ {
@@ -174,7 +170,7 @@ func TestDecoder_LossEstimate(t *testing.T) {
 				parity = p
 			}
 		}
-		// Drop one data frame (index 2); deliver the other three + parity.
+
 		for i, f := range frames {
 			if i == 2 {
 				continue
@@ -192,7 +188,7 @@ func TestDecoder_LossEstimate(t *testing.T) {
 func TestDecoder_LossEstimateZeroWhenClean(t *testing.T) {
 	dec := NewDecoder(0)
 	for g := 0; g < 10; g++ {
-		enc := NewEncoder(0.5) // groupSize=2
+		enc := NewEncoder(0.5)
 		d1, _ := enc.AddData([]byte{byte(g), 0x01})
 		d2, parity := enc.AddData([]byte{byte(g), 0x02})
 		dec.Add(d1)
@@ -228,14 +224,14 @@ func TestFeedbackRoundTrip(t *testing.T) {
 }
 
 func TestFeedbackDrivesEncoderGroupSize(t *testing.T) {
-	enc := NewEncoder(0) // groupSize=64 initially
-	// Simulate the dispatch loop consuming a feedback frame from the peer.
+	enc := NewEncoder(0)
+
 	loss, ok := ParseFeedback(MakeFeedback(0.5))
 	if !ok {
 		t.Fatal("feedback parse failed")
 	}
 	enc.SetLoss(loss)
-	// groupSize=2 now → parity after every 2 data frames.
+
 	enc.AddData([]byte{0x01})
 	if _, parity := enc.AddData([]byte{0x02}); parity == nil {
 		t.Fatal("encoder did not adopt smaller group size after feedback")

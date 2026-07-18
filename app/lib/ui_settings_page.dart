@@ -1,5 +1,3 @@
-// User interface settings screen: launch-at-login and a note about theming.
-// Actual platform calls (launch_at_startup) live in HomePage/_HomePageState.
 import 'package:flutter/material.dart';
 
 import 'theme.dart';
@@ -21,11 +19,6 @@ class UiSettingsPage extends StatefulWidget {
 }
 
 class _UiSettingsPageState extends State<UiSettingsPage> {
-  // Mirrors widget.autostart locally: this page is pushed as its own route,
-  // so HomePage's setState() after the value actually changes can't reach an
-  // already-built UiSettingsPage (see VpnSettingsPage's _mode for the same
-  // issue/fix). Optimistic -- launch_at_startup enable/disable is treated as
-  // best-effort everywhere else in this app too.
   late bool _autostart;
 
   @override

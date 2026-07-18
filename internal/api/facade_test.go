@@ -24,7 +24,7 @@ func TestNewSessionFromSubscription_ParsesEndpoints(t *testing.T) {
 	if got := len(s.configs); got != 2 {
 		t.Fatalf("expected 2 endpoints, got %d", got)
 	}
-	// Per-endpoint keys must be preserved (the flat Config cannot express this).
+
 	if s.configs[0].PubB64 != "AAAA" || s.configs[1].PubB64 != "BBBB" {
 		t.Fatalf("per-endpoint keys not preserved: %q / %q", s.configs[0].PubB64, s.configs[1].PubB64)
 	}
@@ -38,8 +38,7 @@ func TestNewSessionFromSubscription_RejectsBadSignKey(t *testing.T) {
 }
 
 func TestNewSessionFromSubscription_TamperedSignatureRejected(t *testing.T) {
-	// A signed doc whose signature does not match the body must be rejected when
-	// a key is supplied — the UI must never apply a tampered subscription.
+
 	keyHex := "00112233445566778899aabbccddeeff"
 	doc := "#!chimera-subscription-v1\n# sig: deadbeef\n" + validLink + "\n"
 	if _, err := NewSessionFromSubscription(doc, keyHex); err == nil {
@@ -60,11 +59,11 @@ func TestStateJSON_DisconnectedShape(t *testing.T) {
 
 func TestSnapshot_ReportsEndpointStats(t *testing.T) {
 	s := NewSessionFromConfigs(parseDoc(t))
-	// Wire a real pool so Stats() is populated without dialing.
+
 	s.mu.Lock()
 	s.state = StateConnected
 	s.mu.Unlock()
-	// dialer is nil here (no Connect); Snapshot must still produce valid output.
+
 	snap := s.Snapshot()
 	if snap.Transport == "" {
 		t.Fatal("expected a transport in snapshot")
@@ -122,7 +121,6 @@ func TestRunSOCKS_NotConnected(t *testing.T) {
 	}
 }
 
-// parseDoc returns the configs for a minimal one-line subscription.
 func parseDoc(t *testing.T) []carrier.Config {
 	t.Helper()
 	s, err := NewSessionFromSubscription("#!chimera-subscription-v1\n"+validLink+"\n", "")

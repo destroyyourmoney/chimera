@@ -17,7 +17,7 @@ func TestBuildParseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	// SessionID is padded to 32 bytes; the first len(sessionID) bytes must match.
+
 	if !bytes.Equal(sid[:len(sessionID)], sessionID) {
 		t.Errorf("sessionID prefix mismatch\n got:  %x\n want: %x", sid[:len(sessionID)], sessionID)
 	}
@@ -26,8 +26,6 @@ func TestBuildParseRoundTrip(t *testing.T) {
 	}
 }
 
-// FuzzParse asserts the server-side parser never panics on untrusted input.
-// This is the hardening primitive that faces active probers and garbage.
 func FuzzParse(f *testing.F) {
 	seed := Build("example.com", bytes.Repeat([]byte{0xab}, 28), bytes.Repeat([]byte{0xcd}, 32))
 	f.Add(seed)
@@ -36,7 +34,7 @@ func FuzzParse(f *testing.F) {
 	f.Add([]byte{0x16})
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		// Must not panic. Errors and partial results are fine.
+
 		_, _, _ = Parse(raw)
 	})
 }

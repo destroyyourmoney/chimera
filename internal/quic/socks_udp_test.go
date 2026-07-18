@@ -14,16 +14,12 @@ import (
 	"chimera/internal/socks"
 )
 
-// TestSOCKSUDPAssocEndToEnd drives the whole UDP path from a real SOCKS5 client:
-// SOCKS UDP ASSOCIATE → local relay → endpoint.Pool → QUIC carrier (FEC) → server
-// → real UDP echo target → back. It proves the SOCKS5 UDP ASSOCIATE inbound works
-// over the loss-resilient datagram carrier.
 func TestSOCKSUDPAssocEndToEnd(t *testing.T) {
 	serverAddr, pub := startServer(t)
 	echoHost, echoPort := startUDPEcho(t)
 
 	cfg := carrier.Config{Server: serverAddr, PubB64: pub, SNI: "example.com", Transport: "quic"}
-	pool := endpoint.NewPool([]carrier.Config{cfg}) // *Pool implements endpoint.UDPDialer
+	pool := endpoint.NewPool([]carrier.Config{cfg})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -33,14 +29,12 @@ func TestSOCKSUDPAssocEndToEnd(t *testing.T) {
 	defer cancel()
 	go func() { _ = socks.ServeListener(ctx, ln, pool) }()
 
-	// --- act as a SOCKS5 client ---
 	ctrl, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial socks: %v", err)
 	}
 	defer ctrl.Close()
 
-	// greeting: VER=5, 1 method, no-auth
 	if _, err := ctrl.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
@@ -52,11 +46,10 @@ func TestSOCKSUDPAssocEndToEnd(t *testing.T) {
 		t.Fatalf("greeting reply = %v", resp)
 	}
 
-	// UDP ASSOCIATE request with DST 0.0.0.0:0 (client doesn't pre-declare source)
 	if _, err := ctrl.Write([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		t.Fatalf("associate req: %v", err)
 	}
-	// reply: VER REP RSV ATYP(=1 IPv4) ADDR(4) PORT(2)
+
 	rep := make([]byte, 10)
 	if _, err := readFull(t, ctrl, rep); err != nil {
 		t.Fatalf("associate reply: %v", err)
@@ -68,7 +61,6 @@ func TestSOCKSUDPAssocEndToEnd(t *testing.T) {
 	relayPort := int(rep[8])<<8 | int(rep[9])
 	relayAddr := &net.UDPAddr{IP: relayIP, Port: relayPort}
 
-	// Send a UDP datagram via the relay, addressed to the echo server.
 	uc, err := net.DialUDP("udp", nil, relayAddr)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
@@ -99,7 +91,6 @@ func TestSOCKSUDPAssocEndToEnd(t *testing.T) {
 	}
 }
 
-// buildSOCKSUDP wraps data in a SOCKS5 UDP datagram targeting host:port (IPv4).
 func buildSOCKSUDP(host string, port uint16, data []byte) []byte {
 	ip := net.ParseIP(host).To4()
 	out := []byte{0x00, 0x00, 0x00, 0x01}
@@ -108,7 +99,6 @@ func buildSOCKSUDP(host string, port uint16, data []byte) []byte {
 	return append(out, data...)
 }
 
-// parseSOCKSUDP extracts host/port/data from a SOCKS5 UDP datagram (IPv4 only).
 func parseSOCKSUDP(b []byte) (host string, port uint16, data []byte, ok bool) {
 	if len(b) < 10 || b[3] != 0x01 {
 		return "", 0, nil, false

@@ -2,24 +2,6 @@ package rudp
 
 import "encoding/binary"
 
-// Wire format. Each rudp datagram is exactly one frame, tagged by its first
-// byte. rudp runs its own datagram stream, independent of (and never layered
-// over) any reliable QUIC stream.
-//
-//	DATA   : [0x10 | seq:4    | len:2 | payload(len) ]
-//	PARITY : [0x11 | group:4  | k:1   | idx:1 | blockLen:2 | parityBlock ]  (FEC, phase 2)
-//	ACK    : [0x12 | cumAck:4 | nSack:1 | (sackStart:4, sackEnd:4)*nSack | lossPermille:2 | rwnd:4 ]
-//	FIN    : [0x13 | finalSeq:4 ]
-//
-// rwnd is the receiver's free buffer space in segments (flow control, phase 3):
-// the sender keeps new-segment in-flight ≤ rwnd so receiver memory stays bounded.
-//
-// seq numbers DATA segments monotonically. cumAck is the next in-order seq the
-// receiver still needs (everything below it has been delivered). SACK ranges
-// are half-open [start,end) spans of received-but-not-yet-contiguous seqs, so
-// the sender retransmits only true gaps. finalSeq is the FIN's own seq (one
-// past the last DATA seq); the receiver treats FIN as a zero-length segment at
-// that seq, so a clean close is just the stream reaching finalSeq+1.
 type frameType byte
 
 const (
@@ -29,28 +11,22 @@ const (
 	fFin    frameType = 0x13
 )
 
-// maxSackRanges bounds the SACK block count in an ACK frame. SACK is purely an
-// optimization (it never affects correctness), so a small cap keeps ACKs tiny.
 const maxSackRanges = 4
 
-// sackRange is a half-open [start, end) span of contiguously received seqs.
 type sackRange struct {
 	start, end uint32
 }
 
-// frame is the decoded form of any rudp datagram. Only the fields relevant to
-// typ are populated.
 type frame struct {
 	typ          frameType
-	seq          uint32      // fData: segment seq; fFin: finalSeq
-	payload      []byte      // fData
-	cumAck       uint32      // fAck
-	sacks        []sackRange // fAck
-	lossPermille uint16      // fAck
-	rwnd         uint32      // fAck: receiver free buffer in segments (flow control)
+	seq          uint32
+	payload      []byte
+	cumAck       uint32
+	sacks        []sackRange
+	lossPermille uint16
+	rwnd         uint32
 }
 
-// encodeData builds a DATA frame for seq carrying payload.
 func encodeData(seq uint32, payload []byte) []byte {
 	out := make([]byte, 7+len(payload))
 	out[0] = byte(fData)
@@ -60,7 +36,6 @@ func encodeData(seq uint32, payload []byte) []byte {
 	return out
 }
 
-// encodeFin builds a FIN frame whose finalSeq is the FIN's own seq.
 func encodeFin(finalSeq uint32) []byte {
 	out := make([]byte, 5)
 	out[0] = byte(fFin)
@@ -68,7 +43,6 @@ func encodeFin(finalSeq uint32) []byte {
 	return out
 }
 
-// encodeAck builds an ACK frame. At most maxSackRanges ranges are emitted.
 func encodeAck(cumAck uint32, sacks []sackRange, lossPermille uint16, rwnd uint32) []byte {
 	if len(sacks) > maxSackRanges {
 		sacks = sacks[:maxSackRanges]
@@ -89,8 +63,6 @@ func encodeAck(cumAck uint32, sacks []sackRange, lossPermille uint16, rwnd uint3
 	return out
 }
 
-// decodeFrame parses one rudp datagram. ok is false for malformed or unknown
-// frames, which the caller drops.
 func decodeFrame(raw []byte) (f frame, ok bool) {
 	if len(raw) == 0 {
 		return frame{}, false
@@ -141,8 +113,7 @@ func decodeFrame(raw []byte) (f frame, ok bool) {
 			rwnd:         binary.BigEndian.Uint32(raw[off : off+4]),
 		}, true
 	default:
-		// PARITY (0x11) is decoded by the FEC layer in phase 2; treat as
-		// unknown here so phase-1 builds drop it cleanly.
+
 		return frame{}, false
 	}
 }

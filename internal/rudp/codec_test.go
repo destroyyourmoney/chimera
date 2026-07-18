@@ -59,13 +59,13 @@ func TestCodecRejectsTruncatedAndUnknown(t *testing.T) {
 	cases := [][]byte{
 		nil,
 		{},
-		{byte(fData), 0, 0},             // too short for header
-		{byte(fData), 0, 0, 0, 0, 0, 5}, // len says 5, no payload
-		{byte(fFin), 0, 0},              // short fin
-		{byte(fAck), 0, 0, 0, 0, 9},     // nSack=9, no ranges
-		{byte(fAck), 0, 0, 0, 0, 0, 0},  // nSack=0 but missing rwnd tail
-		{byte(fParity), 1, 2, 3},        // phase-2 frame, dropped in phase 1
-		{0xFF, 1, 2},                    // unknown type
+		{byte(fData), 0, 0},
+		{byte(fData), 0, 0, 0, 0, 0, 5},
+		{byte(fFin), 0, 0},
+		{byte(fAck), 0, 0, 0, 0, 9},
+		{byte(fAck), 0, 0, 0, 0, 0, 0},
+		{byte(fParity), 1, 2, 3},
+		{0xFF, 1, 2},
 	}
 	for i, raw := range cases {
 		if _, ok := decodeFrame(raw); ok {

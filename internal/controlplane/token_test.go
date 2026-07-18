@@ -44,7 +44,7 @@ func TestVerifyRejectsBitFlip(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 	flipped := []byte(tok)
-	// Flip a bit inside the payload segment (before the '.').
+
 	for i, c := range flipped {
 		if c == '.' {
 			break
@@ -67,7 +67,7 @@ func TestVerifyRejectsWrongKey(t *testing.T) {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
 	signer := NewSigner(priv)
-	verifier := NewVerifier(otherPub) // wrong public key
+	verifier := NewVerifier(otherPub)
 
 	tok, err := signer.Sign(TokenPayload{ShortIDHex: "deadbeef"})
 	if err != nil {
@@ -82,7 +82,6 @@ func TestVerifyAcceptsEitherKeyDuringRotation(t *testing.T) {
 	oldPub, oldPriv, _ := GenerateKeypair()
 	newPub, newPriv, _ := GenerateKeypair()
 
-	// Grace-window verifier trusts both the outgoing and incoming key.
 	verifier := NewVerifier(newPub, oldPub)
 
 	oldTok, err := NewSigner(oldPriv).Sign(TokenPayload{ShortIDHex: "old"})
@@ -113,9 +112,6 @@ func TestVerifyRejectsExpiredToken(t *testing.T) {
 	pub, priv, _ := GenerateKeypair()
 	verifier := NewVerifier(pub)
 
-	// Sign() always stamps IssuedAt/ExpiresAt as "now" + TTL, so an expired
-	// token is built by hand here, replicating Sign's body+signature
-	// encoding directly, to exercise Verify's expiry check in isolation.
 	payload := TokenPayload{
 		ShortIDHex: "deadbeef",
 		IssuedAt:   time.Now().Add(-2 * TokenTTL).Unix(),

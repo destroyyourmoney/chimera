@@ -16,8 +16,6 @@ import (
 	"chimera/internal/clienthello"
 )
 
-// serverGate reproduces what internal/server does before ServerWrap: read the
-// ClientHello record, recover the shared secret, and verify the auth tag.
 func serverGate(t *testing.T, conn net.Conn, priv *ecdh.PrivateKey) (prefix, ss []byte, ok bool) {
 	t.Helper()
 	br := bufio.NewReader(conn)
@@ -30,7 +28,7 @@ func serverGate(t *testing.T, conn net.Conn, priv *ecdh.PrivateKey) (prefix, ss 
 	if _, err := io.ReadFull(br, raw); err != nil {
 		t.Fatalf("read record: %v", err)
 	}
-	// Include any bytes bufio pulled past the ClientHello (e.g. the dummy CCS).
+
 	if n := br.Buffered(); n > 0 {
 		extra, _ := br.Peek(n)
 		raw = append(raw, extra...)
@@ -85,7 +83,7 @@ func TestRealityRoundTrip(t *testing.T) {
 			srvErr <- err
 			return
 		}
-		// Echo one framed message to prove the TLS channel carries data.
+
 		buf := make([]byte, 5)
 		if _, err := io.ReadFull(tc, buf); err != nil {
 			srvErr <- err
@@ -126,8 +124,6 @@ func TestRealityRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRealityWrongServerKeyFails confirms a client pointed at the wrong server
-// static key cannot complete the PSK confirmation (no oracle, just failure).
 func TestRealityWrongServerKeyFails(t *testing.T) {
 	realPriv, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	wrongPriv, _ := ecdh.X25519().GenerateKey(rand.Reader)
@@ -144,8 +140,7 @@ func TestRealityWrongServerKeyFails(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		// Server holds realPriv; gate will fail to open the tag (client used
-		// wrongPriv's public), so it never reaches ServerWrap. Drain to EOF.
+
 		_, _, ok := serverGate(t, c, realPriv)
 		if ok {
 			t.Error("server unexpectedly authenticated a mismatched key")
@@ -160,7 +155,6 @@ func TestRealityWrongServerKeyFails(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// Client uses the WRONG server public key -> server cannot derive the same ss.
 	if _, _, err := ClientWrap(conn, wrongPriv.PublicKey(), "www.microsoft.com", "0a1b2c3d"); err == nil {
 		t.Fatal("ClientWrap should fail when server key does not match")
 	}

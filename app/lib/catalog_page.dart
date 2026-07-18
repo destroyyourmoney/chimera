@@ -1,34 +1,25 @@
-// Curated server list (ROADMAP2 §2/§4): search + favorites over the fleet
-// served by the real `GET /v1/catalog` (internal/controlplane/api.go),
-// token-gated per ROADMAP2 §0.1 п.1 -- not a public, unauthenticated
-// endpoint. Falls back to the last successfully fetched list (kept only in
-// memory for this screen's lifetime) if a refetch fails, so a brief
-// control-plane hiccup doesn't blank the picker.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
 import 'account_store.dart';
+import 'catalog_cache_store.dart';
 import 'theme.dart';
 
-/// One transport endpoint a [CatalogServer] actually has a running listener
-/// for (ROADMAP2 §3/§4 multi-transport support --
-/// internal/controlplane/catalog.go's `CatalogListener`). `transport` is the
-/// same short code `internal/subscription.Parse` reads out of a `mode=`
-/// query param: `'reality'` for the primary Reality/TCP listener (dialed
-/// with no `mode=` param at all -- see `obfuscationModeQueryParam`), or
-/// `'quic'`/`'ss'`/`'dot'`.
 class CatalogListener {
   const CatalogListener({required this.transport, required this.port});
 
-  factory CatalogListener.fromJson(Map<String, dynamic> json) => CatalogListener(
-    transport: json['transport'] as String? ?? '',
-    port: json['port'] as int? ?? 0,
-  );
+  factory CatalogListener.fromJson(Map<String, dynamic> json) =>
+      CatalogListener(
+        transport: json['transport'] as String? ?? '',
+        port: json['port'] as int? ?? 0,
+      );
 
   final String transport;
   final int port;
+
+  Map<String, dynamic> toJson() => {'transport': transport, 'port': port};
 }
 
 class CatalogServer {
@@ -49,14 +40,7 @@ class CatalogServer {
   factory CatalogServer.fromJson(Map<String, dynamic> json) {
     final port = json['port'] as int? ?? 443;
     final rawListeners = json['listeners'] as List<dynamic>?;
-    // A control-plane that predates multi-transport listeners (or a row
-    // that hasn't been backfilled) sends no `listeners` array at all --
-    // synthesize the one Reality/TCP listener `host`/`port` always implied,
-    // same default internal/controlplane/catalog.go's `CatalogStore.Add`
-    // applies server-side. Never leave this empty: everything downstream
-    // (CatalogServer.portFor, main.dart's _upsertCuratedServer) treats
-    // "no listener for transport X" as "don't offer X for this server", and
-    // an empty list would wrongly disable Reality too.
+
     final listeners = (rawListeners == null || rawListeners.isEmpty)
         ? [CatalogListener(transport: 'reality', port: port)]
         : rawListeners
@@ -91,10 +75,6 @@ class CatalogServer {
 
   String get flag => flagForCountry(country);
 
-  /// The port to dial for [transportParam] (an `obfuscationModeQueryParam`
-  /// value: `''`/`'reality'` for Reality, else `'quic'`/`'ss'`/`'dot'`), or
-  /// null if this server has no listener for that transport -- callers must
-  /// treat null as "not offered here", never fall back to guessing a port.
   int? portFor(String transportParam) {
     final wanted = transportParam.isEmpty ? 'reality' : transportParam;
     for (final l in listeners) {
@@ -103,33 +83,53 @@ class CatalogServer {
     return null;
   }
 
-  /// The set of `obfuscationModeQueryParam` values this server actually
-  /// offers -- drives which Anti-censorship cards are selectable for the
-  /// currently chosen server (ROADMAP2 §0 "no false promises": don't let the
-  /// user pick a transport this server can't actually serve).
   Set<String> get availableTransportParams =>
       listeners.map((l) => l.transport == 'reality' ? '' : l.transport).toSet();
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'host': host,
+    'port': port,
+    'pubkey': pubKey,
+    'sni': sni,
+    'fp': fingerprint,
+    'city': city,
+    'country': country,
+    'load_pct': loadPct,
+    'healthy': healthy,
+    'listeners': listeners.map((l) => l.toJson()).toList(),
+  };
 }
 
-/// Best-effort flag emoji from a country name -- cosmetic only; an unknown
-/// country just falls back to a generic marker rather than blocking
-/// rendering on a full ISO-3166 lookup table. Shared with main.dart's Home
-/// server-card, which shows the same flag for the currently selected server.
 String flagForCountry(String country) {
   const known = {
-    'Sweden': '🇸🇪', 'Switzerland': '🇨🇭', 'Netherlands': '🇳🇱', 'Serbia': '🇷🇸',
-    'Slovakia': '🇸🇰', 'Belgium': '🇧🇪', 'Romania': '🇷🇴', 'Germany': '🇩🇪',
-    'France': '🇫🇷', 'United Kingdom': '🇬🇧', 'Poland': '🇵🇱',
-    'United States': '🇺🇸', 'Norway': '🇳🇴', 'Denmark': '🇩🇰', 'Finland': '🇫🇮',
-    'Austria': '🇦🇹', 'Spain': '🇪🇸', 'Italy': '🇮🇹', 'Portugal': '🇵🇹',
-    'Canada': '🇨🇦', 'Japan': '🇯🇵', 'Singapore': '🇸🇬', 'Australia': '🇦🇺',
+    'Sweden': '🇸🇪',
+    'Switzerland': '🇨🇭',
+    'Netherlands': '🇳🇱',
+    'Serbia': '🇷🇸',
+    'Slovakia': '🇸🇰',
+    'Belgium': '🇧🇪',
+    'Romania': '🇷🇴',
+    'Germany': '🇩🇪',
+    'France': '🇫🇷',
+    'United Kingdom': '🇬🇧',
+    'Poland': '🇵🇱',
+    'United States': '🇺🇸',
+    'Norway': '🇳🇴',
+    'Denmark': '🇩🇰',
+    'Finland': '🇫🇮',
+    'Austria': '🇦🇹',
+    'Spain': '🇪🇸',
+    'Italy': '🇮🇹',
+    'Portugal': '🇵🇹',
+    'Canada': '🇨🇦',
+    'Japan': '🇯🇵',
+    'Singapore': '🇸🇬',
+    'Australia': '🇦🇺',
   };
   return known[country] ?? '🌐';
 }
 
-/// Fetches the curated catalog from the control-plane, trying each mirror
-/// in turn (ROADMAP2 §0.1 п.5), authenticated with the account's own
-/// capability token.
 class CatalogClient {
   CatalogClient({AccountStore? accountStore})
     : _accountStore = accountStore ?? AccountStore();
@@ -144,20 +144,17 @@ class CatalogClient {
     Object? lastError;
     for (final base in _accountStore.mirrors) {
       try {
-        final resp = await http
+        final resp = await _accountStore.client
             .get(
               Uri.parse('$base/v1/catalog'),
               headers: {'Authorization': 'Bearer ${account.token}'},
             )
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 15));
         if (resp.statusCode != 200) {
           lastError = 'catalog fetch failed: HTTP ${resp.statusCode}';
           continue;
         }
-        // A server that predates the empty-catalog fix (Go's nil-slice ->
-        // `null` JSON encoding for zero rows) sends a `null` body instead of
-        // `[]`; treat that the same as an empty catalog rather than
-        // crashing the type cast below.
+
         final decoded = jsonDecode(resp.body);
         final list = decoded == null ? const [] : decoded as List<dynamic>;
         return list
@@ -180,6 +177,8 @@ class CatalogPage extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onSelect,
     this.client,
+    this.cache,
+    this.embedded = false,
   });
 
   final List<String> favoriteIds;
@@ -187,6 +186,9 @@ class CatalogPage extends StatefulWidget {
   final Future<void> Function(String id) onToggleFavorite;
   final Future<void> Function(CatalogServer server) onSelect;
   final CatalogClient? client;
+  final CatalogCacheStore? cache;
+
+  final bool embedded;
 
   @override
   State<CatalogPage> createState() => _CatalogPageState();
@@ -195,29 +197,51 @@ class CatalogPage extends StatefulWidget {
 class _CatalogPageState extends State<CatalogPage> {
   final _searchCtrl = TextEditingController();
   late final CatalogClient _client = widget.client ?? CatalogClient();
+  late final CatalogCacheStore _cache = widget.cache ?? CatalogCacheStore();
   String _query = '';
   List<CatalogServer> _servers = const [];
+  DateTime? _cachedAt;
   bool _loading = true;
+  bool _refreshing = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _init();
+  }
+
+  Future<void> _init() async {
+    final snapshot = await _cache.load();
+    if (snapshot != null && mounted) {
+      setState(() {
+        _servers = snapshot.servers;
+        _cachedAt = snapshot.fetchedAt;
+        _loading = false;
+      });
+    }
+    await _load();
   }
 
   Future<void> _load() async {
     setState(() {
-      _loading = true;
+      _refreshing = true;
+      if (_servers.isEmpty) _loading = true;
       _error = null;
     });
     try {
       final servers = await _client.fetch();
-      if (mounted) setState(() => _servers = servers);
+      if (mounted) {
+        setState(() {
+          _servers = servers;
+          _cachedAt = DateTime.now();
+        });
+      }
+      unawaited(_cache.save(servers));
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) setState(() => _loading = _refreshing = false);
     }
   }
 
@@ -247,83 +271,154 @@ class _CatalogPageState extends State<CatalogPage> {
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<ChimeraTokens>()!;
-    final favorites = _filtered.where((s) => widget.favoriteIds.contains(s.id)).toList();
-    final rest = _filtered.where((s) => !widget.favoriteIds.contains(s.id)).toList();
+    final favorites = _filtered
+        .where((s) => widget.favoriteIds.contains(s.id))
+        .toList();
+    final rest = _filtered
+        .where((s) => !widget.favoriteIds.contains(s.id))
+        .toList();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Select location'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh, size: 20),
-            tooltip: 'Refresh',
-            onPressed: _loading ? null : _load,
+    final refreshButton = IconButton(
+      icon: _refreshing
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.refresh, size: 20),
+      tooltip: 'Refresh',
+      onPressed: _refreshing ? null : _load,
+    );
+    final content = SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: TextField(
+              controller: _searchCtrl,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: InputDecoration(
+                hintText: 'Search country or city',
+                prefixIcon: Icon(
+                  Icons.search,
+                  size: 18,
+                  color: tokens.textFaint,
+                ),
+
+                suffixIcon: widget.embedded ? refreshButton : null,
+              ),
+            ),
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
+
+          if (_error != null && _servers.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-              child: TextField(
-                controller: _searchCtrl,
-                onChanged: (v) => setState(() => _query = v),
-                decoration: InputDecoration(
-                  hintText: 'Search country or city',
-                  prefixIcon: Icon(Icons.search, size: 18, color: tokens.textFaint),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: tokens.surface2,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.history, size: 14, color: tokens.textFaint),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _cachedAt == null
+                            ? 'Showing saved results'
+                            : 'Showing saved results from ${relativeTime(_cachedAt!)}',
+                        style: TextStyle(
+                          fontFamily: 'Plex Sans',
+                          fontSize: 11.5,
+                          color: tokens.textFaint,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: _load,
+                      child: Text(
+                        'Retry',
+                        style: TextStyle(
+                          fontFamily: 'Plex Sans',
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (_error != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: tokens.dangerSoft,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  "Couldn't load the server list. Check your connection and try again.",
+                  style: TextStyle(
+                    fontFamily: 'Plex Sans',
+                    fontSize: 12,
+                    color: tokens.textMuted,
+                  ),
                 ),
               ),
             ),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: tokens.dangerSoft,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    'Could not load the server list: $_error',
-                    style: TextStyle(fontFamily: 'Plex Sans', fontSize: 12, color: tokens.textMuted),
-                  ),
-                ),
-              ),
-            Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                      children: [
-                        if (favorites.isNotEmpty) ...[
-                          _groupLabel(tokens, 'Favorites'),
-                          ...favorites.map((s) => _serverRow(context, tokens, s)),
-                          const SizedBox(height: 8),
-                        ],
-                        _groupLabel(tokens, 'All locations · ${_filtered.length} servers'),
-                        ...rest.map((s) => _serverRow(context, tokens, s)),
-                        if (_filtered.isEmpty && _error == null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 32),
-                            child: Center(
-                              child: Text(
-                                'No matching locations',
-                                style: TextStyle(
-                                  fontFamily: 'Plex Sans',
-                                  fontSize: 13,
-                                  color: tokens.textMuted,
-                                ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    children: [
+                      if (favorites.isNotEmpty) ...[
+                        _groupLabel(tokens, 'Favorites'),
+                        ...favorites.map((s) => _serverRow(context, tokens, s)),
+                        const SizedBox(height: 8),
+                      ],
+                      _groupLabel(
+                        tokens,
+                        'All locations · ${_filtered.length} servers',
+                      ),
+                      ...rest.map((s) => _serverRow(context, tokens, s)),
+                      if (_filtered.isEmpty && _error == null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 32),
+                          child: Center(
+                            child: Text(
+                              'No matching locations',
+                              style: TextStyle(
+                                fontFamily: 'Plex Sans',
+                                fontSize: 13,
+                                color: tokens.textMuted,
                               ),
                             ),
                           ),
-                      ],
-                    ),
-            ),
-          ],
-        ),
+                        ),
+                    ],
+                  ),
+          ),
+        ],
       ),
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Select location'),
+        actions: [refreshButton],
+      ),
+      body: content,
     );
   }
 
@@ -341,7 +436,11 @@ class _CatalogPageState extends State<CatalogPage> {
     ),
   );
 
-  Widget _serverRow(BuildContext context, ChimeraTokens tokens, CatalogServer s) {
+  Widget _serverRow(
+    BuildContext context,
+    ChimeraTokens tokens,
+    CatalogServer s,
+  ) {
     final isFavorite = widget.favoriteIds.contains(s.id);
     final isSelected = widget.selectedId == s.id;
     return Material(

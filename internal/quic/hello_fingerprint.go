@@ -24,9 +24,6 @@ const (
 	legacyTLSHandshakeRecordType byte   = 0x16
 )
 
-// ClientHelloSummary is a compact, stable view of the fields that dominate QUIC
-// Initial fingerprinting. It intentionally preserves ordering for suites,
-// extensions and groups because passive classifiers usually care about order.
 type ClientHelloSummary struct {
 	LegacyVersion   uint16
 	CipherSuites    []uint16
@@ -40,16 +37,12 @@ type ClientHelloSummary struct {
 	QUICParams      []uint64
 }
 
-// ClientHelloDiff describes one difference between two ClientHello summaries.
 type ClientHelloDiff struct {
 	Field string
 	Have  string
 	Want  string
 }
 
-// BuildChromeH3ClientHelloReference builds a uTLS Chrome QUIC ClientHello for
-// the same SNI/ALPN target as the carrier. It is a comparison reference, not yet
-// the active quic-go handshake path.
 func BuildChromeH3ClientHelloReference(sni string) ([]byte, error) {
 	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_133)
 	if err != nil {
@@ -110,8 +103,6 @@ func ensureChromeH3ReferenceExtensions(spec *utls.ClientHelloSpec) {
 	}
 }
 
-// SummarizeClientHello parses a TLS ClientHello handshake message. It accepts
-// either bare QUIC CRYPTO bytes or a TLS record-wrapped ClientHello.
 func SummarizeClientHello(data []byte) (ClientHelloSummary, error) {
 	if len(data) >= 5 && data[0] == legacyTLSHandshakeRecordType {
 		recordLen := int(binary.BigEndian.Uint16(data[3:5]))
@@ -133,7 +124,7 @@ func SummarizeClientHello(data []byte) (ClientHelloSummary, error) {
 		return s, fmt.Errorf("clienthello: truncated fixed header")
 	}
 	s.LegacyVersion = binary.BigEndian.Uint16(body[:2])
-	pos := 34 // legacy_version + random
+	pos := 34
 	if pos >= len(body) {
 		return s, fmt.Errorf("clienthello: missing session id")
 	}

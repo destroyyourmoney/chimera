@@ -1,8 +1,3 @@
-// Public HTTP API (ROADMAP2 §1/§0.1): the only surface an ordinary client
-// ever talks to. Deliberately does not log requests with the caller's IP --
-// no access-log middleware wraps this handler; the only place a remote
-// address is even read is transiently, inside the in-memory rate limiters,
-// which is not persisted anywhere (ROADMAP2 §0's no-logs principle).
 package controlplane
 
 import (
@@ -17,7 +12,6 @@ import (
 	"chimera/internal/ratelimit"
 )
 
-// API wires the store types into HTTP handlers. Construct with NewAPI.
 type API struct {
 	accounts    *AccountStore
 	catalog     *CatalogStore
@@ -25,17 +19,9 @@ type API struct {
 	signer      *Signer
 	verifier    *Verifier
 
-	// Rate limits are in-memory only (ROADMAP2 §0.1 п.2) -- never
-	// persisted, so they double as abuse protection without becoming a
-	// connection log.
 	ipLimiter    *ratelimit.Limiter
 	tokenLimiter *ratelimit.Limiter
 
-	// mirrors is the signed list served at GET /v1/mirrors (ROADMAP2 §0.1
-	// п.5) -- alternate entry points a client falls back to if the primary
-	// domain/IP is blocked, verified against the same public key as tokens
-	// so a client can't be redirected to a rogue mirror by an on-path
-	// attacker.
 	mirrors []string
 }
 
@@ -47,18 +33,12 @@ func NewAPI(accounts *AccountStore, catalog *CatalogStore, revocations *Revocati
 		signer:      signer,
 		verifier:    verifier,
 		mirrors:     mirrors,
-		// 1 req/sec sustained, burst 5 -- generous for a legitimate client
-		// (redeem once, refresh every ~24h, catalog poll every ~15min) while
-		// making a scripted catalog-scrape or redeem-brute-force expensive.
+
 		ipLimiter:    ratelimit.New(1, 5),
 		tokenLimiter: ratelimit.New(1, 5),
 	}
 }
 
-// Mux returns the handler for the public API -- mount behind whatever
-// TLS-terminating reverse proxy the deploy uses, itself configured with
-// access logging OFF (ROADMAP2 §0: "веб-сервер перед ним — без логов
-// доступа").
 func (a *API) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/session/redeem", a.handleRedeem)
@@ -70,9 +50,6 @@ func (a *API) Mux() *http.ServeMux {
 	return mux
 }
 
-// handleMirrors is public/unauthenticated like /v1/revocations -- a client
-// that can't redeem yet (because the primary address is blocked) still
-// needs to be able to fetch this to find a working one.
 func (a *API) handleMirrors(w http.ResponseWriter, r *http.Request) {
 	if !a.ipLimiter.Allow(clientIP(r)) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited")
@@ -131,14 +108,7 @@ func (a *API) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	// short_id_hex is also returned as its own field (not just embedded in
-	// the opaque token) because the client needs it outside the token: a
-	// -auth-mode controlplane server's carrier.TokenVerifier matches the
-	// token's ShortIDHex against the short ID recovered from the client's
-	// own ClientHello (see internal/server/server.go's checkToken), so the
-	// client must dial with -sid/PrimaryServer.sid set to this exact value,
-	// not a catalog-wide short ID -- there's no way to derive it without
-	// either this field or parsing the token's signed body itself.
+
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "short_id_hex": result.ShortIDHex})
 }
 
@@ -156,9 +126,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := a.verifier.Verify(body.Token)
 	if err != nil && !errors.Is(err, ErrTokenExpired) {
-		// An expired-but-validly-signed token is still trusted enough to
-		// look up which device is asking to refresh; anything else
-		// (bad signature, malformed) is rejected outright.
+
 		writeErr(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
@@ -181,9 +149,6 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "short_id_hex": result.ShortIDHex})
 }
 
-// handleCatalog is gated behind a valid token (ROADMAP2 §0.1 п.1) --
-// unlike the first draft's "public, unauthenticated" design, only a
-// bearer that has already redeemed can enumerate the fleet.
 func (a *API) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	if !a.ipLimiter.Allow(clientIP(r)) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited")
@@ -213,10 +178,6 @@ func (a *API) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, servers)
 }
 
-// handleAccountInfo is the account_page.dart data source: status/expiry/
-// device count for the caller's own account, resolved from its token's
-// short ID -- same bearer-token gate and per-token rate limit as
-// handleCatalog, no separate account-number resubmission.
 func (a *API) handleAccountInfo(w http.ResponseWriter, r *http.Request) {
 	if !a.ipLimiter.Allow(clientIP(r)) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited")
@@ -250,9 +211,6 @@ func (a *API) handleAccountInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRevocations is intentionally public/unauthenticated -- see the
-// package doc comment on why gating it behind a token would be
-// counterproductive.
 func (a *API) handleRevocations(w http.ResponseWriter, r *http.Request) {
 	if !a.ipLimiter.Allow(clientIP(r)) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited")
@@ -301,9 +259,6 @@ func statusForAccountErr(err error) int {
 	}
 }
 
-// publicMessageFor returns a message safe to send to the client -- account
-// lookup failures collapse to one message so a scripted redeem-attempt
-// can't distinguish "no such account" from "wrong hash format" etc.
 func publicMessageFor(err error) string {
 	switch {
 	case errors.Is(err, ErrAccountNotFound):

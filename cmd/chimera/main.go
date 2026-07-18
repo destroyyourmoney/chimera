@@ -1,12 +1,3 @@
-// Command chimera is a single binary providing the CHIMERA server, SOCKS5
-// inbound proxy, client PoC, key generation, and share-link tooling.
-//
-//	chimera keygen
-//	chimera link   -host H -port P -pbk K [-sid S -sni N -fp chrome -mode auto -tag name -id uuid]
-//	chimera server -listen :443 -steal-host www.microsoft.com:443 -priv K [-sid a,b]
-//	chimera proxy  -server H:P -pbk K [-listen 127.0.0.1:1080 -sni N -sid S]
-//	chimera client -server H:P -pbk K [-sni N -sid S]
-//	chimera health -server H:P -pbk K [-sni N -sid S -transport auto]
 package main
 
 import (
@@ -129,8 +120,6 @@ func linkCmd(args []string) {
 	}
 }
 
-// qrCmd renders a chimera:// link as a terminal QR code. The link is taken from
-// the first argument, or read from stdin if no argument is given.
 func qrCmd(args []string) {
 	var uri string
 	if len(args) > 0 && args[0] != "" {
@@ -167,7 +156,6 @@ func serverCmd(args []string) {
 	verbose := fs.Bool("v", false, "verbose (debug) logging")
 	_ = fs.Parse(args)
 
-	// Build effective config: file defaults, then CLI overrides.
 	var cfg serverEffectiveCfg
 	cfg.listen = ":443"
 	cfg.transport = "tcp"
@@ -203,7 +191,6 @@ func serverCmd(args []string) {
 		}
 	}
 
-	// CLI flags override file values (non-zero/non-empty = explicitly set).
 	if *listen != "" {
 		cfg.listen = *listen
 	}
@@ -256,20 +243,16 @@ func serverCmd(args []string) {
 
 	if cfg.transport == "quic" || cfg.transport == "quic-rudp" {
 		if tokenVerifier != nil {
-			// QUIC parity for -auth-mode controlplane is a follow-up (Stage 1
-			// wired the TCP carrier first, see internal/server/server.go) --
-			// refusing to start silently in legacy mode would be worse than
-			// failing loudly here.
+
 			log.Fatal("server: -auth-mode controlplane is not yet supported on the QUIC transport")
 		}
-		// quic-rudp shares the QUIC carrier listener; it only adds a new command
-		// (CmdConnectRUDP) the server already handles, so the same serve path runs.
+
 		if carrier.QUICServe == nil {
 			log.Fatal("quic transport requested but binary built without QUIC support (rebuild with -tags chimera_quic)")
 		}
 		must(carrier.QUICServe(ctx, carrier.QUICServerConfig{
 			Listen: cfg.listen, PrivB64: cfg.priv, StealHost: cfg.steal, ShortIDs: cfg.ids,
-			BandwidthBps: uint64(*bw * 125000), // Mbps → bytes/s (1 Mbps = 125000 B/s)
+			BandwidthBps: uint64(*bw * 125000),
 			Allowlist:    allowlist,
 		}))
 		return
@@ -306,10 +289,6 @@ func serverCmd(args []string) {
 	}))
 }
 
-// setupControlPlaneVerifier builds the -auth-mode controlplane
-// carrier.TokenVerifier: parses the (possibly comma-separated, for a
-// rotation grace window) public key list and starts the background
-// revocation poller (ROADMAP2 §1.3/§1.4).
 func setupControlPlaneVerifier(ctx context.Context, pubKeyHex, cpAddr string) carrier.TokenVerifier {
 	if pubKeyHex == "" || cpAddr == "" {
 		log.Fatal("server: -auth-mode controlplane requires -controlplane-pubkey and -controlplane-addr")
@@ -327,11 +306,6 @@ func setupControlPlaneVerifier(ctx context.Context, pubKeyHex, cpAddr string) ca
 	return verifier
 }
 
-// setupUserACL loads the dynamic users file, seeds it from the legacy -sid
-// list if it's empty (so turning this on never locks out existing clients),
-// starts its background poll loop (picks up changes made by the admin API in
-// a sibling process, e.g. the QUIC carrier when only the TCP carrier runs
-// -admin-listen), and — if requested — starts the admin HTTP API itself.
 func setupUserACL(ctx context.Context, usersFile, adminListen, adminToken string, staticIDs []string) *useracl.Store {
 	store, err := useracl.Load(usersFile)
 	if err != nil {
@@ -401,7 +375,6 @@ func proxyCmd(args []string) {
 	}
 	setupLogger(*verbose)
 
-	// If a config file is given, seed the fingerprint from it.
 	if *cfgFile != "" {
 		if fc, err := config.LoadServer(*cfgFile); err == nil && fc.Fp != "" && *fp == "" {
 			*fp = fc.Fp
@@ -410,7 +383,6 @@ func proxyCmd(args []string) {
 
 	var cfgs []carrier.Config
 
-	// Subscription file overrides -server/-pbk when given.
 	if *subFile != "" {
 		var key []byte
 		if *subKey != "" {
@@ -438,9 +410,7 @@ func proxyCmd(args []string) {
 		os.Exit(2)
 	}
 	if *token != "" {
-		// One capability token authorizes the whole curated fleet (ROADMAP2
-		// §1), so it applies uniformly across every pooled endpoint here,
-		// whether it came from -sub or -server/-pbk.
+
 		for i := range cfgs {
 			cfgs[i].Token = *token
 		}
@@ -448,8 +418,6 @@ func proxyCmd(args []string) {
 	ctx, stop := signalContext()
 	defer stop()
 
-	// mode=auto: race QUIC+TCP per dial (demote/promote by health scoring).
-	// Other transports: plain pool with serial failover.
 	var (
 		dialer  endpoint.Dialer
 		pool    *endpoint.Pool
@@ -467,9 +435,6 @@ func proxyCmd(args []string) {
 		mutator = p
 	}
 
-	// Hot-reload fingerprint/profile from config file. The uTLS build also has
-	// a process-level updater for TCP handshakes; updating pool configs makes
-	// future QUIC/TCP dials pick up cfg.Fp without restarting.
 	if *cfgFile != "" {
 		go config.Watch(ctx, *cfgFile, func(fc *config.ServerConfig) {
 			if fc.Fp == "" {
@@ -482,15 +447,12 @@ func proxyCmd(args []string) {
 		})
 	}
 
-	// Optional auto-provisioning: turn the burned-endpoint signal into fresh endpoints.
 	var prov provision.Provisioner
 	if *provCmd != "" {
-		key, _ := hexDecode(*subKey) // reuse -sub-key to verify a signed provision subscription
+		key, _ := hexDecode(*subKey)
 		prov = provision.ShellCommandProvisioner(*provCmd, key)
 	}
 
-	// Background telemetry: logs health snapshots every 30s, warns when rotation needed,
-	// and auto-provisions replacements when a provisioner is configured.
 	mon := telemetry.NewMonitor(pool, telemetry.DefaultConfig())
 	mon.OnRotationNeeded(func(burned []telemetry.BurnedEndpoint) {
 		servers := make([]string, len(burned))
@@ -512,8 +474,6 @@ func proxyCmd(args []string) {
 	must(socks.Serve(ctx, *listen, dialer))
 }
 
-// connectCmd starts a SOCKS5 inbound directly from a single chimera:// link — the
-// "scanned a QR, paste the URI, connect" convenience over `proxy -server -pbk …`.
 func connectCmd(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	listen := fs.String("listen", "127.0.0.1:1080", "local SOCKS5 listen address")
@@ -553,10 +513,6 @@ func connectCmd(args []string) {
 	must(socks.Serve(ctx, *listen, dialer))
 }
 
-// tunCmd runs a full-tunnel TUN device routed through the carrier via the
-// userspace netstack. The data path itself is compiled only with -tags
-// chimera_netstack (see tun_on.go / tun_off.go); without it this reports a clear
-// error. Creating the TUN device requires privileges (root / utun).
 func tunCmd(args []string) {
 	fs := flag.NewFlagSet("tun", flag.ExitOnError)
 	srv := fs.String("server", "", "CHIMERA server host:port (comma-separated for failover)")
@@ -677,7 +633,6 @@ func splitServerList(s string) []string {
 	return out
 }
 
-// healthCmd pings each server endpoint and prints a one-shot health dashboard.
 func healthCmd(args []string) {
 	fs := flag.NewFlagSet("health", flag.ExitOnError)
 	srv := fs.String("server", "", "CHIMERA server host:port (required; comma-separated for multiple)")
@@ -738,13 +693,10 @@ func healthCmd(args []string) {
 	}
 }
 
-// signalContext returns a context cancelled on SIGINT/SIGTERM for graceful shutdown.
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
-// setupLogger installs a text slog handler. Long-running roles call it with the
-// verbose flag; one-shot commands fall back to the default once at startup.
 func setupLogger(verbose ...bool) {
 	level := slog.LevelInfo
 	if len(verbose) > 0 && verbose[0] {

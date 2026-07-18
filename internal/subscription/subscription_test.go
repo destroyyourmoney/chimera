@@ -60,19 +60,17 @@ func TestParse_HMACVerification(t *testing.T) {
 
 	body := header + "\n# sig: " + sig + "\n" + testURI + "\n"
 
-	// Correct key → success.
 	if _, err := Parse(strings.NewReader(body), key); err != nil {
 		t.Fatalf("valid sig rejected: %v", err)
 	}
 
-	// Wrong key → failure.
 	if _, err := Parse(strings.NewReader(body), []byte("wrong")); err == nil {
 		t.Fatal("expected HMAC mismatch, got nil")
 	}
 }
 
 func TestParse_HMACAbsentKeyIgnored(t *testing.T) {
-	// No sig line + no key → no verification, accepted.
+
 	body := header + "\n" + testURI + "\n"
 	if _, err := Parse(strings.NewReader(body), nil); err != nil {
 		t.Fatalf("unsigned sub rejected: %v", err)

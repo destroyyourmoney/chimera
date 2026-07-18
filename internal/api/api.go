@@ -1,17 +1,3 @@
-// Package api exposes the CHIMERA tunnel as an embeddable Go API.
-//
-// This is the integration surface for mobile bindings (gomobile), desktop tray
-// apps, and headless embedding. Callers create a Session, call Connect once, then
-// dial arbitrary host:port through the tunnel. Disconnect stops all active relay
-// goroutines and closes the underlying carrier.
-//
-//	s := api.NewSession(cfg)
-//	if err := s.Connect(ctx); err != nil { … }
-//	conn, err := s.Dial("tcp", "example.com:443")
-//	…
-//	s.Disconnect()
-//
-// Thread safety: all public methods are safe for concurrent use.
 package api
 
 import (
@@ -28,26 +14,20 @@ import (
 
 var pingCarrier = carrier.Ping
 
-// Config is the API-level session configuration. It mirrors carrier.Config but
-// is decoupled from it so the API surface can evolve independently.
 type Config struct {
-	// Servers is a list of CHIMERA server addresses ("host:port"). Multiple
-	// addresses are balanced with automatic health-aware failover.
 	Servers []string
-	// PubB64 is the server's X25519 public key encoded as base64url.
+
 	PubB64 string
-	// SNI is the TLS ServerName to present (steal-host domain).
+
 	SNI string
-	// ShortIDHex is the optional short ID (hex string) for the auth tag.
+
 	ShortIDHex string
-	// Transport selects the carrier: "tcp", "quic", or "auto" (race QUIC+TCP).
-	// Defaults to "auto".
+
 	Transport string
-	// Shaping enables H3-video traffic shaping on the write path (QUIC only).
+
 	Shaping bool
 }
 
-// State is the observable tunnel state.
 type State int
 
 const (
@@ -67,26 +47,20 @@ func (s State) String() string {
 	}
 }
 
-// Session manages the lifecycle of one CHIMERA tunnel session.
 type Session struct {
 	cfg     Config
 	mu      sync.RWMutex
 	state   State
-	dialer  endpoint.Dialer // raw pool/auto-pool (used by netstack/TUN)
-	metered endpoint.Dialer // byte-counting wrapper (used by Dial/SOCKS)
+	dialer  endpoint.Dialer
+	metered endpoint.Dialer
 	cancel  context.CancelFunc
 
-	// configs, when non-empty, are per-endpoint carrier configs (e.g. parsed
-	// from a subscription with per-endpoint keys) and take precedence over the
-	// flat cfg.Servers/PubB64 view.
 	configs []carrier.Config
 
-	up   atomic.Int64 // bytes written to tunnel (egress, via Dial/SOCKS)
-	down atomic.Int64 // bytes read from tunnel (ingress, via Dial/SOCKS)
+	up   atomic.Int64
+	down atomic.Int64
 }
 
-// NewSession creates a Session with the given config. Connect must be called
-// before Dial.
 func NewSession(cfg Config) *Session {
 	if cfg.Transport == "" {
 		cfg.Transport = "auto"
@@ -94,9 +68,6 @@ func NewSession(cfg Config) *Session {
 	return &Session{cfg: cfg}
 }
 
-// NewSessionFromConfigs creates a Session from explicit per-endpoint carrier
-// configs (as produced by a subscription). This is the path that preserves
-// per-endpoint keys, SNIs and transports — the flat Config cannot express them.
 func NewSessionFromConfigs(configs []carrier.Config) *Session {
 	transport := "auto"
 	if len(configs) > 0 && configs[0].Transport != "" {
@@ -105,9 +76,6 @@ func NewSessionFromConfigs(configs []carrier.Config) *Session {
 	return &Session{cfg: Config{Transport: transport}, configs: configs}
 }
 
-// Connect initialises the endpoint pool and verifies at least one endpoint
-// reachable by issuing a Ping. Returns an error if all endpoints fail.
-// Connect is idempotent: calling it on an already-connected Session is a no-op.
 func (s *Session) Connect(ctx context.Context) error {
 	s.mu.Lock()
 	if s.state == StateConnected {
@@ -130,7 +98,6 @@ func (s *Session) Connect(ctx context.Context) error {
 		dialer = endpoint.NewPool(cfgs)
 	}
 
-	// Verify at least one endpoint is reachable.
 	if err := pingAny(ctx, cfgs); err != nil {
 		s.setState(StateDisconnected)
 		return err
@@ -148,8 +115,6 @@ func (s *Session) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Disconnect tears down the session. All subsequent Dial calls will fail.
-// Calling Disconnect on a non-connected Session is a no-op.
 func (s *Session) Disconnect() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,9 +130,6 @@ func (s *Session) Disconnect() {
 	s.state = StateDisconnected
 }
 
-// Dial opens a tunnel to the given network address through the CHIMERA server.
-// Only "tcp" network is supported. The returned net.Conn is ready for
-// bidirectional I/O.
 func (s *Session) Dial(_ string, addr string) (net.Conn, error) {
 	s.mu.RLock()
 	dialer := s.metered
@@ -188,7 +150,6 @@ func (s *Session) Dial(_ string, addr string) (net.Conn, error) {
 	return dialer.DialConnect(host, uint16(portN))
 }
 
-// State returns the current connection state.
 func (s *Session) State() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -201,9 +162,6 @@ func (s *Session) setState(st State) {
 	s.mu.Unlock()
 }
 
-// carrierConfigs returns the per-endpoint configs to dial. Explicit per-endpoint
-// configs (from a subscription) win; otherwise the flat cfg.Servers view is
-// expanded with the shared PubB64/SNI/ShortID.
 func (s *Session) carrierConfigs() []carrier.Config {
 	if len(s.configs) > 0 {
 		return s.configs

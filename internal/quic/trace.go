@@ -14,9 +14,6 @@ var initialPacketTracer struct {
 	fn func(InitialPacketSummary)
 }
 
-// SetInitialCryptoDataTracer installs a process-local observer for client Initial
-// TLS CRYPTO data emitted by the QUIC carrier. It is intended for fingerprint
-// validation harnesses and tests; production code should leave it unset.
 func SetInitialCryptoDataTracer(fn func([]byte)) func() {
 	initialCryptoDataTracer.Lock()
 	prev := initialCryptoDataTracer.fn
@@ -39,9 +36,6 @@ func currentInitialCryptoDataTracer() func([]byte) {
 	return func(p []byte) { fn(append([]byte(nil), p...)) }
 }
 
-// SetInitialPacketTracer installs a process-local observer for client Initial
-// packet summaries emitted by the QUIC carrier. It is intended for packet-level
-// fingerprint validation harnesses and tests; production code should leave it unset.
 func SetInitialPacketTracer(fn func(InitialPacketSummary)) func() {
 	initialPacketTracer.Lock()
 	prev := initialPacketTracer.fn

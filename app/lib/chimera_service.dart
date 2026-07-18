@@ -1,13 +1,3 @@
-// TUN-only tunnel lifecycle for the tray app: no SOCKS5, no chimera.dll
-// session. Connect does a fast reachability preflight over chimera.dll's
-// FFI (newTunnel/connect/freeHandle -- no startSocks, no isolate, no
-// session left open), then hands off to NetworkProtectionController.engage
-// to bring up the real TUN device/routes/firewall via chimera-helper (or its
-// elevated CLI fallback). Live state/throughput comes from polling
-// NetworkProtectionController.status, which is chimera-helper reading the
-// chimera.exe tun child's own status file (see internal/tun.Bridge.Stats
-// and cmd/chimera/tun_on.go's runStatusWriter) -- not from any local proxy
-// session, which is what used to leave the tray showing 0 B/s.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -46,14 +36,19 @@ class ChimeraState {
     required this.bytesDown,
     required this.lastError,
     this.endpoints = const [],
+    this.isReconnecting = false,
   });
 
-  factory ChimeraState.disconnected({String lastError = ''}) => ChimeraState(
+  factory ChimeraState.disconnected({
+    String lastError = '',
+    bool isReconnecting = false,
+  }) => ChimeraState(
     state: 'disconnected',
     transport: '',
     bytesUp: 0,
     bytesDown: 0,
     lastError: lastError,
+    isReconnecting: isReconnecting,
   );
 
   factory ChimeraState.fromJson(Map<String, dynamic> json) => ChimeraState(
@@ -74,14 +69,11 @@ class ChimeraState {
   final String lastError;
   final List<EndpointStatus> endpoints;
 
+  final bool isReconnecting;
+
   bool get isConnected => state == 'connected';
 }
 
-/// PrimaryServer is the parsed connection material for the one server the
-/// TUN device is actually built against -- resolved by the caller (see
-/// main.dart's _resolvePrimaryServer, unchanged) from the first saved
-/// server's link, the same "primary server" convention the old
-/// NetworkProtection.enable call sites already used.
 class PrimaryServer {
   const PrimaryServer({
     required this.host,
@@ -99,40 +91,27 @@ class PrimaryServer {
   final String sni;
   final String sid;
 
-  /// Anti-censorship transport carried by this server's chimera:// link
-  /// (its Mode field: '', 'auto', 'quic', or 'tcp') -- forced onto the TUN
-  /// device's carrier dialer so full-tunnel Connect actually uses the
-  /// obfuscation method the server was configured with, the same way the
-  /// old SOCKS5 path used to.
   final String transport;
 
-  /// Control-plane capability token (ROADMAP2 §1), read live from
-  /// AccountStore at connect time (see main.dart's _resolvePrimaryServer)
-  /// rather than baked into the saved server entry -- the token refreshes
-  /// on its own ~24h TTL, so a value captured once at "Choose server" time
-  /// would go stale. Empty for -auth-mode useracl servers/legacy BYO links.
   final String token;
 
   String get address => '$host:$port';
 }
 
 class TunnelService {
-  /// bindings/controller are injectable so tests can exercise connect/
-  /// disconnect/reconnect-watchdog logic against fakes instead of the real
-  /// chimera.dll and chimera-helper IPC. Defaults are platform-picked:
-  /// ChimeraBindings.open() throws on anything but Windows (no chimera.dll
-  /// there), so Android gets AndroidNoPreflightNativeApi (the reachability
-  /// check it would have done happens inside ChimeraVpnService.kt's
-  /// RealGoTunnel.start instead) paired with AndroidNetworkProtectionController.
-  TunnelService({ChimeraNativeApi? bindings, NetworkProtectionController? controller})
-    : _bindings =
-          bindings ??
-          (Platform.isAndroid ? const AndroidNoPreflightNativeApi() : ChimeraBindings.open()),
-      _controller =
-          controller ??
-          (Platform.isAndroid
-              ? AndroidNetworkProtectionController()
-              : DefaultNetworkProtectionController());
+  TunnelService({
+    ChimeraNativeApi? bindings,
+    NetworkProtectionController? controller,
+  }) : _bindings =
+           bindings ??
+           (Platform.isAndroid
+               ? const AndroidNoPreflightNativeApi()
+               : ChimeraBindings.open()),
+       _controller =
+           controller ??
+           (Platform.isAndroid
+               ? AndroidNetworkProtectionController()
+               : DefaultNetworkProtectionController());
 
   final ChimeraNativeApi _bindings;
   final NetworkProtectionController _controller;
@@ -140,11 +119,6 @@ class TunnelService {
   Timer? _pollTimer;
   final _stateController = StreamController<ChimeraState>.broadcast();
 
-  // Reconnect watchdog: _desiredConnected reflects the user's own Connect/
-  // Disconnect intent, not transient link state. When a poll observes the
-  // tunnel down while it's true, _scheduleReconnect retries the whole
-  // preflight+engage flow with capped exponential backoff instead of
-  // hammering a dead server.
   bool _desiredConnected = false;
   String _lastSubscriptionText = '';
   String _lastSignKeyHex = '';
@@ -158,10 +132,6 @@ class TunnelService {
 
   Stream<ChimeraState> get stateUpdates => _stateController.stream;
 
-  /// connect verifies the subscription reaches a real handshake fast (via
-  /// chimera.dll, no session left open), then brings up the full-tunnel TUN
-  /// device against [primaryServer] at [mode]. Returns an error message, or
-  /// null on success.
   Future<String?> connect(
     String subscriptionText, {
     required PrimaryServer primaryServer,
@@ -211,32 +181,17 @@ class TunnelService {
     return null;
   }
 
-  /// _preflight runs the newTunnel/connect/freeHandle reachability check
-  /// (see ChimeraNativeApi) and returns the connect error, or '' on success.
-  ///
-  /// `lib.lookupFunction` calls are synchronous, and `connect` blocks on a
-  /// real network round-trip (pingAny dialing every configured endpoint in
-  /// turn -- see internal/api.pingAny). Run on the real chimera.dll bindings
-  /// directly on the UI isolate, that freezes the whole Flutter engine for
-  /// the duration: window minimize/move, the tray's own click handling, and
-  /// even "Quit" (which awaits disconnect() behind the same isolate) all
-  /// stop responding until the native call returns. So for the real bindings
-  /// this hands the call to a fresh background isolate (which must reopen
-  /// chimera.dll itself -- DynamicLibrary handles don't cross isolates, only
-  /// the plain-int tunnel handle does). Fakes (tests, Android's no-op stub)
-  /// aren't isolate-sendable and are already instant, so they run inline.
   Future<String> _preflight(String subscriptionText, String signKeyHex) {
     final bindings = _bindings;
     if (bindings is ChimeraBindings) {
       return Isolate.run(
-        () => _runPreflight(ChimeraBindings.open(), subscriptionText, signKeyHex),
+        () =>
+            _runPreflight(ChimeraBindings.open(), subscriptionText, signKeyHex),
       );
     }
     return Future.value(_runPreflight(bindings, subscriptionText, signKeyHex));
   }
 
-  /// disconnect is the user-initiated stop: clears the reconnect intent so
-  /// the watchdog does not immediately reconnect.
   Future<void> disconnect() async {
     _desiredConnected = false;
     _reconnectTimer?.cancel();
@@ -253,6 +208,8 @@ class TunnelService {
 
   void _scheduleReconnect() {
     _reconnectTimer?.cancel();
+
+    _stateController.add(ChimeraState.disconnected(isReconnecting: true));
     _reconnectTimer = Timer(_reconnectDelay, () async {
       if (!_desiredConnected) return;
       final err = await _connectOnce();
@@ -292,9 +249,26 @@ class TunnelService {
   }
 }
 
-/// Top-level so it can run inside the background isolate `_preflight` spawns
-/// for the real bindings (an `Isolate.run` closure must not capture `this`).
-/// Returns the connect error, or '' on success.
+String friendlyConnectError(String raw) {
+  if (raw.isEmpty) return raw;
+  final lower = raw.toLowerCase();
+  if (lower.contains('deadline exceeded') ||
+      lower.contains('timeout') ||
+      lower.contains('timed out')) {
+    return 'Server took too long to respond. Try again or pick a different location.';
+  }
+  if (lower.contains('wsarecv') ||
+      lower.contains('connection attempt failed') ||
+      lower.contains('actively refused') ||
+      lower.contains('connection refused')) {
+    return "Couldn't reach the server. It may be offline or blocked on this network.";
+  }
+  if (lower.contains('all endpoints failed')) {
+    return 'None of the available servers responded. Try a different location.';
+  }
+  return raw;
+}
+
 String _runPreflight(
   ChimeraNativeApi bindings,
   String subscriptionText,

@@ -9,10 +9,10 @@ func TestBuildParseRoundTrip(t *testing.T) {
 			Host:   "203.0.113.7", Port: "443", Pbk: "HD-Fk6tO4ZgiocibdM4GqOydco80pKlcEz49ISHnWUc",
 			Sid: "0a1b2c3d", Sni: "www.microsoft.com", Fp: "chrome", Mode: "auto", Tag: "My Server",
 		},
-		{ // minimal: no auth id, no short id, no tag
+		{
 			Host: "example.com", Port: "8443", Pbk: "abc", Sni: "cdn.example", Fp: "chrome", Mode: "tcp",
 		},
-		{ // IPv6 host
+		{
 			Host: "2001:db8::1", Port: "443", Pbk: "k", Sni: "h", Fp: "chrome", Mode: "quic", Tag: "v6",
 		},
 	}

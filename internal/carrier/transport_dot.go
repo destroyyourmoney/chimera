@@ -1,45 +1,5 @@
 //go:build chimera_dot
 
-// DNS-over-TCP carrier (ROADMAP2 §3): promotes the DNS-over-TCP fallback
-// already used internally for DNS resolution (internal/netstack's
-// relayDNSOverTCP, added for the "connected but nothing resolves" fix) to a
-// standalone, user-selectable anti-censorship transport. Unlike that
-// fallback -- which speaks *real* DNS-over-TCP to resolve *real* domain
-// names for the tunnel's own DNS traffic -- this transport disguises the
-// CHIMERA handshake and tunnel itself as a stream of DNS-over-TCP
-// query/response messages (RFC 7766 framing: 2-byte length + message)
-// between client and server, carrying the actual encrypted payload inside
-// each message's EDNS0 OPT pseudo-record (RFC 6891) as a private-use
-// option.
-//
-// Honest compromise, matching the caveat pattern in transport_shadowsocks.go:
-// this discipline is framing-level, not turn-perfect protocol emulation --
-// the server may send several "response"-shaped messages with self-chosen
-// IDs without a strict 1:1 query/response pairing, so it can push downlink
-// data whenever it has some rather than only in reply to a client query.
-// A sophisticated DPI box correlating query/response ID pairs over time
-// could in principle notice this; documented here rather than glossed
-// over, same spirit as ROADMAP2 §0.1 п.3. Positioning (see
-// anticensorship_page.dart): slower than the other three, but blocking
-// DNS-over-TCP outright breaks the censor's own network too.
-//
-// FIXED (previously logged here as a KNOWN ISSUE against docker/bench.sh):
-// root cause was a plain return-value bug in dotConn.Write, not a
-// connection-teardown/RST timing issue as first suspected. The loop drains
-// its local `p` slice down to zero length via `p = p[n:]` and then returned
-// `len(p)` (always 0) instead of the original input length. Every relay of
-// more than a trickle of data goes through io.Copy, which treats any
-// Write() returning fewer bytes than requested as io.ErrShortWrite and
-// aborts the copy immediately -- even though every byte had, in fact, already
-// been written correctly onto the wire (confirmed by instrumenting both
-// sides: the full payload always arrived intact before the abort). This is
-// also why the earlier byte-for-byte diff came back clean -- the data that
-// *did* get copied was never corrupted, only truncated by the premature
-// abort. Fixed by capturing the original length in `total` before the loop
-// and returning that. dotServeTunnel's wait-for-both-directions/CloseWrite
-// half-close (below) is kept as a defensive belt-and-suspenders shutdown
-// discipline, matching the pattern documented on it, even though it was not
-// itself the fix for this bug.
 package carrier
 
 import (
@@ -76,16 +36,10 @@ func init() {
 const (
 	dotWindowSeconds = 120
 	dotShortIDLen    = 4
-	dotMaxChunk      = 1200 // keeps each DNS message a plausible size over TCP
-	// dotOptionCode is a private/experimental EDNS0 option code (RFC 6891
-	// reserves 65001-65534 for local/experimental use) carrying the actual
-	// encrypted payload chunk.
+	dotMaxChunk      = 1200
+
 	dotOptionCode = 65001
 )
-
-// --- minimal HKDF-SHA256 (RFC 5869) -- see transport_shadowsocks.go's
-// identical comment on why this is duplicated per-transport rather than
-// shared: each transport file stays fully self-contained. ---
 
 func dotHkdfExtract(salt, ikm []byte) []byte {
 	h := hmac.New(sha256.New, salt)
@@ -138,21 +92,14 @@ func dotNewGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// dotConn wraps a raw net.Conn with DNS-over-TCP message framing. Each
-// Write is chunked into one or more DNS messages (query-shaped if isClient,
-// response-shaped otherwise) whose OPT option carries an AEAD-sealed
-// payload chunk; each Read parses the next length-prefixed DNS message off
-// the wire and returns its decrypted option payload. tunnel.Session's own
-// padded control-frame protocol rides on top of this unchanged, exactly as
-// it does on the other three transports.
 type dotConn struct {
 	net.Conn
-	isClient             bool
-	queryName            dnsmessage.Name
-	sendAEAD, recvAEAD   cipher.AEAD
-	sendCounter          uint64
-	recvCounter          uint64
-	recvBuf              []byte
+	isClient           bool
+	queryName          dnsmessage.Name
+	sendAEAD, recvAEAD cipher.AEAD
+	sendCounter        uint64
+	recvCounter        uint64
+	recvBuf            []byte
 }
 
 func newDotConn(c net.Conn, isClient bool, queryName dnsmessage.Name, sendAEAD, recvAEAD cipher.AEAD) *dotConn {
@@ -165,8 +112,6 @@ func (d *dotConn) nonce(counter uint64) []byte {
 	return n
 }
 
-// writeMessage seals payload and wraps it in one DNS message, framed with
-// the RFC 7766 2-byte length prefix.
 func (d *dotConn) writeMessage(payload []byte) error {
 	sealed := d.sendAEAD.Seal(nil, d.nonce(d.sendCounter), payload, nil)
 	d.sendCounter++
@@ -192,8 +137,6 @@ func (d *dotConn) writeMessage(payload []byte) error {
 	return err
 }
 
-// readMessage reads one length-prefixed DNS message and returns its
-// decrypted OPT option payload.
 func (d *dotConn) readMessage() ([]byte, error) {
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(d.Conn, lenBuf[:]); err != nil {
@@ -257,9 +200,6 @@ func (d *dotConn) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-// CloseWrite forwards a half-close to the embedded connection when it
-// supports one (e.g. *net.TCPConn) -- lets a relay signal "no more data
-// coming" with a clean FIN instead of only a full Close().
 func (d *dotConn) CloseWrite() error {
 	if cw, ok := d.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
@@ -305,17 +245,13 @@ func dotHandshakeClient(cfg Config) (*dotConn, *tunnel.Session, error) {
 		return nil, nil, err
 	}
 
-	conn, err := net.Dial("tcp", cfg.Server)
+	conn, err := net.DialTimeout("tcp", cfg.Server, DialTimeout)
 	if err != nil {
 		return nil, nil, err
 	}
 	qname := dotQueryName(cfg.SNI)
 	dc := newDotConn(conn, true, qname, k.c2s, k.s2c)
 
-	// Message 1: raw ephemeral pubkey, cleartext by necessity (the server
-	// can't derive keys before it has this), carried as an otherwise
-	// unauthenticated OPT payload -- the AEAD-sealed auth frame right
-	// after is what actually proves anything.
 	if err := dc.writeMessageRaw(eph.PublicKey().Bytes()); err != nil {
 		conn.Close()
 		return nil, nil, err
@@ -349,9 +285,6 @@ func dotHandshakeClient(cfg Config) (*dotConn, *tunnel.Session, error) {
 	return dc, sess, nil
 }
 
-// writeMessageRaw sends payload as a DNS message's OPT option WITHOUT AEAD
-// sealing -- used only for the very first message (the ephemeral pubkey),
-// before either side has derived a shared key.
 func (d *dotConn) writeMessageRaw(payload []byte) error {
 	var msg dnsmessage.Message
 	msg.Header = dnsmessage.Header{ID: uint16(time.Now().UnixNano()), Response: !d.isClient, RecursionDesired: d.isClient}
@@ -373,9 +306,6 @@ func (d *dotConn) writeMessageRaw(payload []byte) error {
 	return err
 }
 
-// readMessageRaw reads one DNS message and returns its OPT payload without
-// attempting AEAD decryption -- the server-side counterpart to
-// writeMessageRaw, used only to read the client's very first message.
 func (d *dotConn) readMessageRaw() ([]byte, error) {
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(d.Conn, lenBuf[:]); err != nil {
@@ -500,8 +430,6 @@ func dotHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, qname dn
 		return
 	}
 
-	// dc is constructed with placeholder AEAD ciphers (nil) until keys are
-	// derived below; readMessageRaw/writeMessageRaw don't touch them.
 	dc := &dotConn{Conn: c, isClient: false, queryName: qname}
 
 	ephPub, err := dc.readMessageRaw()
@@ -556,18 +484,6 @@ func dotHandleConn(c net.Conn, priv *ecdh.PrivateKey, serverPub []byte, qname dn
 	dotServeTunnel(dc, sess)
 }
 
-// dotServeTunnel mirrors ssServeTunnel/server.serveTunnel, with one
-// deliberate difference that fixes the KNOWN ISSUE documented at the top of
-// this file: ssServeTunnel/server.serveTunnel return (and let their caller's
-// deferred Close run) as soon as the FIRST of the two copy directions
-// finishes, leaving the other goroutine's Read still pending against the
-// connection that's about to be closed. On a raw byte-stream transport that
-// race is usually harmless; on dot's message-framed conn it reliably
-// produced a hard TCP close (RST, discarding any not-yet-acked bytes still
-// in flight) instead of a clean shutdown, right around the final
-// chunked-encoding boundary -- matching the observed curl exit 18 exactly.
-// Fix: half-close each direction with CloseWrite (a clean FIN) as it
-// finishes, and only fully Close once BOTH directions have drained.
 func dotServeTunnel(rw io.ReadWriteCloser, sess *tunnel.Session) {
 	cmd, host, port, err := sess.ReadRequest(rw)
 	if err != nil {
@@ -577,7 +493,7 @@ func dotServeTunnel(rw io.ReadWriteCloser, sess *tunnel.Session) {
 		_ = sess.WriteStatus(rw, true)
 		return
 	}
-	target, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	target, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))), DialTimeout)
 	if err != nil {
 		_ = sess.WriteStatus(rw, false)
 		return

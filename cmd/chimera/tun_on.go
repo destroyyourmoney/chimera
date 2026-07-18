@@ -16,9 +16,6 @@ import (
 	"chimera/internal/winnet"
 )
 
-// tunStatus is the JSON document periodically written to -status-file so a
-// parent process (chimera-helper) can report live tunnel state/throughput
-// back to its own client without a direct channel into this process.
 type tunStatus struct {
 	State     string `json:"state"`
 	BytesUp   uint64 `json:"bytesUp"`
@@ -28,9 +25,6 @@ type tunStatus struct {
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
-// writeStatus atomically replaces statusFile's contents (write to a temp
-// file in the same directory, then rename) so a concurrent reader never
-// observes a torn write.
 func writeStatus(statusFile string, st tunStatus) error {
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -43,9 +37,6 @@ func writeStatus(statusFile string, st tunStatus) error {
 	return os.Rename(tmp, statusFile)
 }
 
-// runStatusWriter periodically writes br's stats to statusFile until ctx is
-// done, then writes a final "idle" status so a stale "running" status file
-// never lingers.
 func runStatusWriter(ctx context.Context, statusFile string, br *tun.Bridge, server, transport string) {
 	if statusFile == "" {
 		return
@@ -83,11 +74,8 @@ func runStatusWriter(ctx context.Context, statusFile string, br *tun.Bridge, ser
 	}
 }
 
-// runTUN builds a userspace netstack over the carrier dialer and bridges it to a
-// real TUN device (full-tunnel VPN mode). Compiled only with -tags chimera_netstack.
 func runTUN(ctx context.Context, dialer endpoint.Dialer, name string, mtu int, setup *winnet.Config, keepSetup bool, statusFile, server, transport string) error {
-	// UDP forwarding is optional: only pools that can open a datagram carrier
-	// (QUIC-backed) implement netstack.UDPDialer; otherwise UDP flows are dropped.
+
 	udp, _ := dialer.(netstack.UDPDialer)
 	stack, err := netstack.New(dialer, udp)
 	if err != nil {

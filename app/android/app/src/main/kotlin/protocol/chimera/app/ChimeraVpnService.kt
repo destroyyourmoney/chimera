@@ -12,21 +12,6 @@ import android.util.Log
 import chimeramobile.Tunnel
 import java.net.URLEncoder
 
-/**
- * Full-tunnel VPN service (ROADMAP2 §4 Android): the Kotlin counterpart to
- * `NetworkProtection`/chimera-helper on Windows. Builds a real TUN
- * interface via [VpnService.Builder] and holds it as a foreground service,
- * same lifecycle every Android VPN app follows.
- *
- * Packet forwarding is backed by the compiled Go tunnel (`mobile/bind.go`'s
- * `Tunnel.startFD`, via `chimera.aar` built with `gomobile bind`) through
- * [RealGoTunnel] below. The control-plane capability token (ROADMAP2 §1) is
- * threaded through end to end: `AndroidNetworkProtectionController`
- * (network_protection.dart) reads it live from AccountStore at connect
- * time and passes it via the MethodChannel's `token` arg, which
- * [buildChimeraLink] embeds as the link's `tok` query param
- * (internal/link.Profile.Token) for `-auth-mode controlplane` servers.
- */
 class ChimeraVpnService : VpnService() {
     companion object {
         private const val TAG = "ChimeraVpnService"
@@ -49,13 +34,13 @@ class ChimeraVpnService : VpnService() {
         var isRunning: Boolean = false
             private set
 
-        // Set on start, cleared on stop -- lets MainActivity's "status"
-        // MethodChannel case read the live session snapshot without binding
-        // to this service (see currentStatusJson).
+        
+        
+        
         @Volatile
         private var activeTunnel: GoTunnel? = null
 
-        /** Read by MainActivity's "status" case; see AndroidNetworkProtectionController (vpn_backend.dart). */
+        
         fun currentStatusJson(): String =
             activeTunnel?.stateJSON() ?: """{"state":"disconnected","transport":"","bytesUp":0,"bytesDown":0}"""
     }
@@ -101,11 +86,9 @@ class ChimeraVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("10.89.0.2", 32)
             .addRoute("0.0.0.0", 0)
+            .addAddress("fd7a:1157:6d69:6d65:7261::2", 128)
+            .addRoute("::", 0)
         for (server in dns) builder.addDnsServer(server)
-        // killswitch (block everything outside the tunnel) vs dnsLeakGuard
-        // (route-only) is enforced Go-side once the tunnel is wired up --
-        // see internal/winnet's split for the Windows equivalent of this
-        // same distinction.
 
         tunInterface?.close()
         tunInterface = builder.establish()
@@ -158,8 +141,8 @@ class ChimeraVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        // The user pulled VPN permission from system settings -- tear down
-        // cleanly instead of leaking a dangling tunnel.
+        
+        
         stopTunnel()
         super.onRevoke()
     }
@@ -170,14 +153,8 @@ class ChimeraVpnService : VpnService() {
     }
 }
 
-/** Seam over the compiled Go tunnel -- see class doc comment above. */
 interface GoTunnel {
-    /**
-     * onFailure is invoked (from the background thread) if the handshake/
-     * reachability check (`Tunnel.connect()`) or `startFD` itself throws --
-     * lets the caller tear the foreground service down instead of leaving a
-     * TUN device open with nothing behind it.
-     */
+    
     fun start(
         fd: Int, mtu: Int, server: String, pbk: String, mode: String,
         sni: String, sid: String, transport: String, token: String,
@@ -185,24 +162,10 @@ interface GoTunnel {
     )
     fun stop()
 
-    /** Current session snapshot as JSON (api.StateSnapshot's shape: state/
-     * transport/bytesUp/bytesDown/endpoints) -- see MainActivity's "status"
-     * MethodChannel case. Safe to call from any thread. */
+    
     fun stateJSON(): String
 }
 
-/**
- * Builds a `chimera://` link (same format `internal/link.Build` emits and
- * `main.dart`'s `_upsertCuratedServer` constructs) from the discrete fields
- * the MethodChannel call carries, so [chimeramobile.Tunnel]'s
- * `NewTunnelFromLink` constructor can parse it exactly like a pasted/QR'd
- * link. `transport` is the short transport code the query string's `mode`
- * param expects -- '' (Reality), 'quic', 'ss', or 'dot' -- matching the
- * mapping in `main.dart`'s `_upsertCuratedServer`. `token` (ROADMAP2 §1
- * control-plane capability token) becomes the link's `tok` param
- * (internal/link.Profile.Token) when non-empty; empty for -auth-mode
- * useracl servers/legacy BYO links, which don't need one.
- */
 internal fun buildChimeraLink(
     server: String, pbk: String, sni: String, sid: String, transport: String, token: String,
 ): String {
@@ -217,21 +180,14 @@ internal fun buildChimeraLink(
     return "chimera://$server?$query"
 }
 
-/**
- * Real implementation backed by `chimeramobile.Tunnel` (the gomobile AAR
- * built from `mobile/bind.go`). `startFD` blocks until `stop()` cancels the
- * session, so it runs on its own thread -- the same "blocks until Stop(),
- * run on a background thread" contract `mobile/bind.go` documents for
- * desktop callers.
- */
 class RealGoTunnel : GoTunnel {
     private var tunnel: Tunnel? = null
     private var runner: Thread? = null
 
-    // Tunnel(link)/connect() do real network I/O (the "verifies reachability"
-    // step mobile/bind.go documents) -- constructing them, and startFD's own
-    // blocking loop, all happen on this one background thread so nothing here
-    // ever risks ANRing the caller (onStartCommand runs on the main thread).
+    
+    
+    
+    
     override fun start(
         fd: Int, mtu: Int, server: String, pbk: String, mode: String,
         sni: String, sid: String, transport: String, token: String,

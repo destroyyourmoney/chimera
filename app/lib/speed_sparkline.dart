@@ -1,6 +1,3 @@
-// Lightweight bytes/sec sparkline: no charting dependency, just a
-// CustomPainter drawing a polyline (plus a soft gradient area fill and an
-// emphasized endpoint dot) over the last ~30 samples.
 import 'package:flutter/material.dart';
 
 class SpeedSparkline extends StatelessWidget {
@@ -11,7 +8,6 @@ class SpeedSparkline extends StatelessWidget {
     this.height = 32,
   });
 
-  /// samples is oldest-first; only the tail (up to ~30) is drawn.
   final List<double> samples;
   final Color? color;
   final double height;
@@ -44,7 +40,6 @@ class _SparklinePainter extends CustomPainter {
         Offset(dx * i, size.height - samples[i] * scale),
     ];
 
-    // Soft gradient area fill under the line, closed down to the baseline.
     final areaPath = Path()..moveTo(points.first.dx, size.height);
     for (final p in points) {
       areaPath.lineTo(p.dx, p.dy);
@@ -60,7 +55,6 @@ class _SparklinePainter extends CustomPainter {
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
     canvas.drawPath(areaPath, areaPaint);
 
-    // Stroke line.
     final linePath = Path()..moveTo(points.first.dx, points.first.dy);
     for (final p in points.skip(1)) {
       linePath.lineTo(p.dx, p.dy);
@@ -71,7 +65,6 @@ class _SparklinePainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
     canvas.drawPath(linePath, linePaint);
 
-    // Emphasized endpoint at the last (rightmost / most current) sample.
     final endpointPaint = Paint()
       ..color = color
       ..style = PaintingStyle.fill;

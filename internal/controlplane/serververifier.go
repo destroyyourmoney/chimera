@@ -1,10 +1,3 @@
-// ServerVerifier is the data-plane side of ROADMAP2 §1.3/§1.4: it lets a
-// carrier server implement carrier.TokenVerifier by checking a token's
-// Ed25519 signature/expiry locally (no network call, no disk read on the
-// hot path) plus a revocation cache refreshed on the same 5-second poll
-// cadence useracl.Store.Watch already uses for its own file -- just against
-// the control-plane's public GET /v1/revocations?since= instead of a local
-// YAML file.
 package controlplane
 
 import (
@@ -18,13 +11,8 @@ import (
 	"time"
 )
 
-// RevocationPollInterval matches useracl.PollInterval -- see package doc.
 const RevocationPollInterval = 5 * time.Second
 
-// ServerVerifier implements carrier.TokenVerifier. Construct with
-// NewServerVerifier and call Watch in a goroutine to keep the revocation
-// cache warm; VerifyToken works (against a possibly-stale cache) even
-// before the first successful poll, defaulting to "nothing revoked yet".
 type ServerVerifier struct {
 	verifier      *Verifier
 	revocationURL string
@@ -45,9 +33,6 @@ func NewServerVerifier(pubKeys []ed25519.PublicKey, controlPlaneBaseURL string) 
 	return v
 }
 
-// VerifyToken implements carrier.TokenVerifier: signature + expiry +
-// shortID match + not on the (cached) revocation list. Pure in-memory
-// check, safe to call per-connection.
 func (v *ServerVerifier) VerifyToken(token string, shortIDHex string) bool {
 	payload, err := v.verifier.Verify(token)
 	if err != nil {
@@ -65,13 +50,10 @@ func (v *ServerVerifier) VerifyToken(token string, shortIDHex string) bool {
 	return true
 }
 
-// Watch polls the control-plane's revocation feed every
-// RevocationPollInterval until done is closed, same lifecycle contract as
-// useracl.Store.Watch.
 func (v *ServerVerifier) Watch(done <-chan struct{}) {
 	t := time.NewTicker(RevocationPollInterval)
 	defer t.Stop()
-	v.poll() // prime the cache immediately rather than waiting a full tick
+	v.poll()
 	for {
 		select {
 		case <-done:

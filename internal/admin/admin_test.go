@@ -11,8 +11,6 @@ import (
 	"chimera/internal/useracl"
 )
 
-// fakeStore is an in-memory Store for HTTP-layer tests, independent of
-// useracl's own file-persistence tests.
 type fakeStore struct {
 	users []useracl.User
 }

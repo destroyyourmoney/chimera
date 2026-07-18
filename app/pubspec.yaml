@@ -37,10 +37,9 @@ dependencies:
 
   # Tray icon + native context menu (Windows/macOS/Linux).
   tray_manager: ^0.5.3
-  # Start hidden, show/hide the settings window from the tray menu.
+  # A real resizable/minimizable window with a taskbar entry; also lets the
+  # tray icon show/hide it and Settings minimize-to-tray on close.
   window_manager: ^0.5.1
-  # Display work-area bounds, for clamping the popover next to the tray icon.
-  screen_retriever: ^0.2.2
   # dart:ffi native-memory helpers (calloc, toNativeUtf8, cast).
   ffi: ^2.1.4
   # Persist the pasted chimera:// link across restarts.
@@ -52,6 +51,8 @@ dependencies:
   # Windows Registry / macOS LoginItems / Linux autostart entry (Phase F).
   launch_at_startup: ^0.5.1
   http: ^1.6.0
+  crypto: ^3.0.6
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:

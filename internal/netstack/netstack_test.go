@@ -21,9 +21,6 @@ import (
 	"chimera/internal/carrier"
 )
 
-// loopback pumps the stack's outbound packets back in as inbound, so a gonet
-// client on the same stack reaches the forwarders — a privilege-free stand-in for
-// a TUN device.
 func (s *Stack) loopback(ctx context.Context) {
 	for {
 		b := s.ReadOutbound(ctx)
@@ -34,8 +31,6 @@ func (s *Stack) loopback(ctx context.Context) {
 	}
 }
 
-// addClientAddr assigns a source address so the test's gonet client has one; the
-// forwarders accept any destination via promiscuous mode regardless.
 func (s *Stack) addClientAddr(t *testing.T, ip [4]byte) {
 	t.Helper()
 	err := s.stack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
@@ -47,10 +42,8 @@ func (s *Stack) addClientAddr(t *testing.T, ip [4]byte) {
 	}
 }
 
-// --- fakes ---
-
 type fakeTCPDialer struct {
-	target string // real loopback echo to relay to
+	target string
 	mu     sync.Mutex
 	host   string
 	port   uint16
@@ -69,7 +62,6 @@ func (f *fakeTCPDialer) seen() (string, uint16) {
 	return f.host, f.port
 }
 
-// fakeUDPCarrier echoes every Send back through Receive.
 type fakeUDPCarrier struct {
 	in   chan []byte
 	once sync.Once
@@ -103,30 +95,18 @@ type fakeUDPDialer struct{ c *fakeUDPCarrier }
 
 func (d fakeUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) { return d.c, nil }
 
-// failingUDPDialer models a client that has no QUIC support (or an
-// unreachable QUIC endpoint): every DialUDPCarrier call fails, same as
-// defaultUDPDial's errNoUDP in internal/endpoint/pool.go.
 type failingUDPDialer struct{}
 
 func (failingUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
 	return nil, errors.New("no udp carrier")
 }
 
-// slowUDPDialer blocks until release is closed before returning -- models a
-// real QUIC dial against a network that silently drops UDP (the network's
-// NAT/firewall never delivers a response), which fails via quic-go's own
-// handshake/idle timeout on the order of many seconds, not immediately like
-// failingUDPDialer above. This is the case ensureUDPCarrier's fast-fail path
-// (udpCarrierDialTimeout) exists for: real DNS resolvers give up in a few
-// seconds and must not wait on this.
 type slowUDPDialer struct{ release chan struct{} }
 
 func (d *slowUDPDialer) DialUDPCarrier() (carrier.UDPCarrier, error) {
 	<-d.release
 	return nil, errors.New("slow udp dial: network never answered")
 }
-
-// --- helpers ---
 
 func startTCPEcho(t *testing.T) string {
 	t.Helper()
@@ -147,9 +127,6 @@ func startTCPEcho(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// startDNSOverTCPEcho listens for RFC 1035 §4.2.2-framed messages (2-byte
-// big-endian length prefix) and echoes each one back with the same framing --
-// a stand-in for a real DNS-over-TCP responder.
 func startDNSOverTCPEcho(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -187,8 +164,6 @@ func startDNSOverTCPEcho(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// --- tests ---
-
 func TestNetstackTCPForward(t *testing.T) {
 	fd := &fakeTCPDialer{target: startTCPEcho(t)}
 	ns, err := New(fd, nil)
@@ -221,7 +196,6 @@ func TestNetstackTCPForward(t *testing.T) {
 		t.Fatalf("echo = %q, want %q", got, msg)
 	}
 
-	// The forwarder must have handed the ORIGINAL destination to the carrier dialer.
 	if host, port := fd.seen(); host != "10.0.0.99" || port != 8080 {
 		t.Fatalf("carrier dialed %s:%d, want 10.0.0.99:8080", host, port)
 	}
@@ -263,11 +237,6 @@ func TestNetstackUDPForward(t *testing.T) {
 	}
 }
 
-// fakeUDPCarrierMulti models a real multi-association carrier (like the
-// server's datagramMux, internal/quic/datagram.go): every OpenAssoc call
-// gets its own fresh assocID instead of the single-flow fake's fixed "1", so
-// a test can drive multiple concurrent flows through one carrier and prove
-// the dispatch loop demuxes them correctly by assocID.
 type fakeUDPCarrierMulti struct {
 	mu        sync.Mutex
 	nextID    uint16
@@ -316,12 +285,6 @@ func (f *fakeUDPCarrierMulti) Close() error {
 	return nil
 }
 
-// countingUDPDialer counts DialUDPCarrier calls -- the regression this test
-// guards against is that count climbing past 1 with multiple concurrent
-// flows, i.e. netstack going back to dialing a fresh carrier (a full QUIC
-// connection + Reality handshake, on the real carrier) per flow instead of
-// reusing one shared carrier via OpenAssoc. See ensureUDPCarrier's doc
-// comment in netstack.go for why that regression is exactly what broke DNS.
 type countingUDPDialer struct {
 	mu    sync.Mutex
 	count int
@@ -375,10 +338,6 @@ func TestNetstackUDPForward_SharesOneCarrierAcrossFlows(t *testing.T) {
 		}
 	}
 
-	// Two distinct UDP flows (different destination ports -> different
-	// gVisor forwarder requests, same shape as two DNS queries from
-	// different ephemeral source sockets) -- the bug this guards against
-	// dialed a fresh carrier for each one of these.
 	conn1 := dial(53)
 	defer conn1.Close()
 	conn2 := dial(5353)
@@ -395,13 +354,6 @@ func TestNetstackUDPForward_SharesOneCarrierAcrossFlows(t *testing.T) {
 	}
 }
 
-// TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable guards against the
-// exact regression reported in production: transport=tcp (or any build/config
-// without QUIC) leaves ensureUDPCarrier permanently failing, and every DNS
-// query silently timed out (ERR_NAME_NOT_RESOLVED) even though ordinary TCP
-// CONNECT flows worked fine. A destination-port-53 UDP flow must now be
-// answered via relayDNSOverTCP over the (working) TCP carrier instead of being
-// dropped.
 func TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable(t *testing.T) {
 	fd := &fakeTCPDialer{target: startDNSOverTCPEcho(t)}
 	ns, err := New(fd, failingUDPDialer{})
@@ -442,18 +394,9 @@ func TestNetstackDNSFallsBackToTCPWhenUDPCarrierUnavailable(t *testing.T) {
 	}
 }
 
-// TestNetstackDNSFallsBackFastWhenUDPCarrierDialIsSlow guards against the
-// production regression the failing-dialer test above doesn't catch: a real
-// QUIC dial against a network that silently drops UDP doesn't fail
-// instantly, it hangs until quic-go's own handshake/idle timeout -- many
-// seconds, far past what any real DNS resolver waits (nslookup: 2s per try).
-// ensureUDPCarrier must give up on a hung dial within udpCarrierDialTimeout
-// so relayDNSOverTCP gets a chance to answer before the resolver does, and a
-// second query arriving during the retry backoff must not wait on another
-// slow dial either.
 func TestNetstackDNSFallsBackFastWhenUDPCarrierDialIsSlow(t *testing.T) {
 	dialer := &slowUDPDialer{release: make(chan struct{})}
-	defer close(dialer.release) // let the background dial finish, don't leak it past the test
+	defer close(dialer.release)
 
 	fd := &fakeTCPDialer{target: startDNSOverTCPEcho(t)}
 	ns, err := New(fd, dialer)
@@ -498,16 +441,10 @@ func TestNetstackDNSFallsBackFastWhenUDPCarrierDialIsSlow(t *testing.T) {
 		}
 	}
 
-	// A resolver like nslookup gives up after ~2s; the fast-fail path must
-	// answer well within that even though the underlying dial never returns
-	// on its own within the test.
 	conn1 := dial()
 	defer conn1.Close()
 	query(conn1, "first-query", 2*time.Second)
 
-	// A second query shortly after (the resolver's own retry, or a second
-	// hostname lookup) must hit the cached failure and answer fast too,
-	// instead of queuing up behind another slow dial attempt.
 	conn2 := dial()
 	defer conn2.Close()
 	query(conn2, "second-query", 500*time.Millisecond)

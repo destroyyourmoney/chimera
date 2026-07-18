@@ -10,7 +10,6 @@ import (
 	"chimera/internal/endpoint"
 )
 
-// mockDialer always returns the provided conn/err.
 type mockDialer struct {
 	conn net.Conn
 	err  error
@@ -20,7 +19,6 @@ func (m *mockDialer) DialConnect(_ string, _ uint16) (net.Conn, error) {
 	return m.conn, m.err
 }
 
-// fakeConn is a minimal net.Conn for tests.
 type fakeConn struct{ net.Conn }
 
 func (fakeConn) Close() error { return nil }
@@ -80,12 +78,12 @@ func TestSession_DialForwardsToDialer(t *testing.T) {
 
 func TestSession_DisconnectIdempotent(t *testing.T) {
 	s := NewSession(Config{Transport: "tcp"})
-	s.Disconnect() // already disconnected — should not panic
+	s.Disconnect()
 	s.Disconnect()
 }
 
 func TestSession_ConnectNoServers(t *testing.T) {
-	s := NewSession(Config{Transport: "tcp"}) // no Servers set
+	s := NewSession(Config{Transport: "tcp"})
 	err := s.Connect(context.Background())
 	if err == nil {
 		t.Fatal("expected error with no servers configured")
@@ -149,7 +147,7 @@ func TestSession_ConnectFailsWhenAllEndpointsFail(t *testing.T) {
 }
 
 func TestNewSession_DefaultsTransportToAuto(t *testing.T) {
-	s := NewSession(Config{}) // Transport not set
+	s := NewSession(Config{})
 	if s.cfg.Transport != "auto" {
 		t.Fatalf("expected Transport=auto, got %q", s.cfg.Transport)
 	}
@@ -167,9 +165,7 @@ func TestSession_StateString(t *testing.T) {
 	}
 }
 
-// Compile-time check: Session.Dial signature matches gomobile's net.Conn return.
 var _ func(string, string) (net.Conn, error) = NewSession(Config{}).Dial
 
-// Compile-time check: endpoint.Dialer interface is satisfied by both pool types.
 var _ endpoint.Dialer = endpoint.NewPool([]carrier.Config{})
 var _ endpoint.Dialer = endpoint.NewAutoPool([]carrier.Config{})

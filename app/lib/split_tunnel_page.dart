@@ -1,14 +1,3 @@
-// Split tunneling screen (docs/app/platform-features.md §2), styled after
-// Mullvad's app picker: master Enable toggle, Include/Exclude segmented
-// control, search, and two lists -- the chosen apps (with a live counter)
-// and everything else -- with a +/- button per row instead of checkboxes so
-// a row visibly moves between sections when tapped.
-//
-// This screen owns the picker UI and persistence only. On today's desktop
-// tray (TUN-less SOCKS5, see main.dart's header comment) there is no
-// OS-level per-app routing yet -- that's the elevated-helper WFP/cgroup work
-// tracked in ROADMAP.md's Этап 4 "per-app routing" item -- so the toggle is
-// honest about not being enforced until that lands.
 import 'dart:async';
 import 'dart:io';
 
@@ -18,10 +7,6 @@ import 'installed_apps.dart';
 import 'settings_store.dart';
 import 'theme.dart';
 
-/// Keyword-matched presets: desktop apps don't have a stable cross-machine
-/// package id the way Android does, so a template selects by matching
-/// installed display names against a keyword list rather than a fixed id
-/// set. Good enough for "pick my messengers" without a maintained catalog.
 const Map<String, List<String>> _templates = {
   'Messengers': ['telegram', 'whatsapp', 'signal', 'discord', 'skype', 'viber'],
   'Browsers': ['chrome', 'firefox', 'edge', 'brave', 'opera'],
@@ -33,13 +18,13 @@ class SplitTunnelPage extends StatefulWidget {
     super.key,
     required this.settings,
     required this.onChanged,
+    this.embedded = false,
   });
 
-  /// Owned by the caller (HomePage/_settings.splitTunnel); this screen
-  /// mutates it in place and calls [onChanged] to persist, matching the
-  /// ServersPage convention.
   final SplitTunnelSettings settings;
   final Future<void> Function() onChanged;
+
+  final bool embedded;
 
   @override
   State<SplitTunnelPage> createState() => _SplitTunnelPageState();
@@ -57,6 +42,11 @@ class _SplitTunnelPageState extends State<SplitTunnelPage> {
   @override
   void initState() {
     super.initState();
+
+    if (widget.settings.mode != SplitTunnelMode.exclude) {
+      widget.settings.mode = SplitTunnelMode.exclude;
+      widget.onChanged();
+    }
     _searchCtrl.addListener(() {
       setState(() => _query = _searchCtrl.text.trim().toLowerCase());
     });
@@ -91,12 +81,6 @@ class _SplitTunnelPageState extends State<SplitTunnelPage> {
 
   void _setEnabled(bool v) {
     setState(() => widget.settings.enabled = v);
-    widget.onChanged();
-  }
-
-  void _setMode(SplitTunnelMode m) {
-    if (widget.settings.mode == m) return;
-    setState(() => widget.settings.mode = m);
     widget.onChanged();
   }
 
@@ -150,108 +134,103 @@ class _SplitTunnelPageState extends State<SplitTunnelPage> {
         .where((a) => !selectedIds.contains(a.id))
         .where((a) => _query.isEmpty || a.name.toLowerCase().contains(_query))
         .toList();
-    final selectedLabel = widget.settings.mode == SplitTunnelMode.include
-        ? 'Included apps'
-        : 'Excluded apps';
+    const selectedLabel = 'Excluded apps';
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Split tunneling')),
-      body: SafeArea(
-        child: Column(
-          children: [
+    final content = SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+            child: _enableRow(context, tokens),
+          ),
+          if (widget.settings.enabled) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-              child: _enableRow(context, tokens),
+              child: _warningBanner(context, tokens),
             ),
-            if (widget.settings.enabled) ...[
+            if (!_supportsPerAppRouting)
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                child: _warningBanner(context, tokens),
+                padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+                child: _unsupportedBanner(context, tokens),
               ),
-              if (!_supportsPerAppRouting)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-                  child: _unsupportedBanner(context, tokens),
-                ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-                child: _modeSegment(context, tokens),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                child: _templateChips(context, tokens),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-                child: TextField(
-                  controller: _searchCtrl,
-                  decoration: const InputDecoration(
-                    hintText: 'Search for…',
-                    prefixIcon: Icon(Icons.search, size: 18),
-                  ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+              child: _templateChips(context, tokens),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+              child: TextField(
+                controller: _searchCtrl,
+                decoration: const InputDecoration(
+                  hintText: 'Search for…',
+                  prefixIcon: Icon(Icons.search, size: 18),
                 ),
               ),
-              Expanded(
-                child: _loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : ListView(
-                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                        children: [
-                          _sectionHeader(
-                            tokens,
-                            '$selectedLabel — ${selected.length} out of ${_allApps.length}',
-                          ),
-                          const SizedBox(height: 6),
-                          if (selected.isEmpty)
-                            _emptyState(tokens, 'No apps chosen yet.')
-                          else
-                            for (final a in selected)
-                              _appRow(
-                                context,
-                                tokens,
-                                a,
-                                isAdd: false,
-                                onTap: () => _removeApp(a),
-                              ),
-                          const SizedBox(height: 20),
-                          _sectionHeader(tokens, 'All apps'),
-                          const SizedBox(height: 6),
-                          if (available.isEmpty)
-                            _emptyState(
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                      children: [
+                        _sectionHeader(
+                          tokens,
+                          '$selectedLabel — ${selected.length} out of ${_allApps.length}',
+                        ),
+                        const SizedBox(height: 6),
+                        if (selected.isEmpty)
+                          _emptyState(tokens, 'No apps chosen yet.')
+                        else
+                          for (final a in selected)
+                            _appRow(
+                              context,
                               tokens,
-                              _query.isEmpty
-                                  ? 'Every installed app is already added.'
-                                  : 'No apps match "$_query".',
-                            )
-                          else
-                            for (final a in available)
-                              _appRow(
-                                context,
-                                tokens,
-                                a,
-                                isAdd: true,
-                                onTap: () => _addApp(a),
-                              ),
-                        ],
-                      ),
-              ),
-            ] else
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-                child: Text(
-                  'Turn this on to route only chosen apps through CHIMERA '
-                  '(or everything except them).',
-                  style: TextStyle(
-                    fontFamily: 'Plex Sans',
-                    fontSize: 12.5,
-                    color: tokens.textMuted,
-                    height: 1.35,
-                  ),
+                              a,
+                              isAdd: false,
+                              onTap: () => _removeApp(a),
+                            ),
+                        const SizedBox(height: 20),
+                        _sectionHeader(tokens, 'All apps'),
+                        const SizedBox(height: 6),
+                        if (available.isEmpty)
+                          _emptyState(
+                            tokens,
+                            _query.isEmpty
+                                ? 'Every installed app is already added.'
+                                : 'No apps match "$_query".',
+                          )
+                        else
+                          for (final a in available)
+                            _appRow(
+                              context,
+                              tokens,
+                              a,
+                              isAdd: true,
+                              onTap: () => _addApp(a),
+                            ),
+                      ],
+                    ),
+            ),
+          ] else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+              child: Text(
+                'Turn this on to route chosen apps outside the tunnel.',
+                style: TextStyle(
+                  fontFamily: 'Plex Sans',
+                  fontSize: 12.5,
+                  color: tokens.textMuted,
+                  height: 1.35,
                 ),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Split tunneling')),
+      body: content,
     );
   }
 
@@ -330,7 +309,11 @@ class _SplitTunnelPageState extends State<SplitTunnelPage> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.error),
+          Icon(
+            Icons.info_outline,
+            size: 16,
+            color: Theme.of(context).colorScheme.error,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -346,25 +329,6 @@ class _SplitTunnelPageState extends State<SplitTunnelPage> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _modeSegment(BuildContext context, ChimeraTokens tokens) {
-    return SegmentedButton<SplitTunnelMode>(
-      segments: const [
-        ButtonSegment(
-          value: SplitTunnelMode.exclude,
-          label: Text('Exclude'),
-          icon: Icon(Icons.remove_circle_outline, size: 16),
-        ),
-        ButtonSegment(
-          value: SplitTunnelMode.include,
-          label: Text('Include'),
-          icon: Icon(Icons.add_circle_outline, size: 16),
-        ),
-      ],
-      selected: {widget.settings.mode},
-      onSelectionChanged: (s) => _setMode(s.first),
     );
   }
 

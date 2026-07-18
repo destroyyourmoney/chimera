@@ -1,13 +1,3 @@
-// Integration test (ROADMAP2 §5: "the most important test in the plan" --
-// the first point where the previously-independent control-plane and
-// data-plane subsystems must agree on the token format on the wire).
-//
-// Flow: spin up a real control-plane HTTP API + a real data-plane carrier
-// server (internal/server) wired to carrier.TokenVerifier +
-// ServerVerifier's revocation poller -> redeem over HTTP like a real
-// client would -> dial through carrier.DialConnect with the redeemed
-// token -> relay actually works end-to-end -> revoke -> the next dial is
-// rejected within one poll interval.
 package controlplane
 
 import (
@@ -54,7 +44,7 @@ func startFakeStealHost(t *testing.T) string {
 }
 
 func TestIntegrationRedeemDialRevoke(t *testing.T) {
-	// --- control-plane: real DB + real HTTP API ---
+
 	db := newTestDB(t)
 	accounts := NewAccountStore(db)
 	catalog := NewCatalogStore(db)
@@ -74,7 +64,6 @@ func TestIntegrationRedeemDialRevoke(t *testing.T) {
 		t.Fatalf("CreateAccount: %v", err)
 	}
 
-	// --- redeem over real HTTP, like the Flutter client eventually will ---
 	devicePub := base64.StdEncoding.EncodeToString([]byte("integration-test-device"))
 	redeemBody, _ := json.Marshal(map[string]string{"account_number": number, "device_pubkey": devicePub})
 	resp, err := http.Post(cpSrv.URL+"/v1/session/redeem", "application/json", bytes.NewReader(redeemBody))
@@ -102,7 +91,6 @@ func TestIntegrationRedeemDialRevoke(t *testing.T) {
 	}
 	shortIDHex := payload.ShortIDHex
 
-	// --- data-plane: real carrier server, controlplane-mode TokenVerifier ---
 	dataplaneVerifier := NewServerVerifier([]ed25519.PublicKey{pub}, cpSrv.URL)
 
 	stealAddr := startFakeStealHost(t)
@@ -133,16 +121,14 @@ func TestIntegrationRedeemDialRevoke(t *testing.T) {
 		Token:      token,
 	}
 
-	// --- dial with the redeemed token: relay must work ---
 	if err := carrier.Ping(cfg); err != nil {
 		t.Fatalf("expected ping with a freshly-redeemed token to succeed: %v", err)
 	}
 
-	// --- revoke, then the next dial must be rejected within one poll cycle ---
 	if err := revocations.Revoke(shortIDHex); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	dataplaneVerifier.poll() // deterministic instead of sleeping RevocationPollInterval
+	dataplaneVerifier.poll()
 
 	if err := carrier.Ping(cfg); err == nil {
 		t.Fatal("expected ping to fail after the short id was revoked")

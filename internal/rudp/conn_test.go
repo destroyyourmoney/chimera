@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// fastConfig keeps RTOs small so lossy transfers finish quickly in tests while
-// still exercising the full retransmit machinery. FEC is on so the property
-// tests cover the encode/decode path too.
 func fastConfig() Config {
 	c := fastConfigNoFEC()
 	c.FEC = true
@@ -28,8 +25,6 @@ func fastConfigNoFEC() Config {
 	}
 }
 
-// transfer streams payload from a writer Conn to a reader Conn over the given
-// pipe params and asserts the received bytes equal the sent bytes exactly.
 func transfer(t *testing.T, payload []byte, seed int64, p pipeParams) {
 	t.Helper()
 	endA, endB := newLossyPipe(seed, p)
@@ -89,8 +84,6 @@ func TestTransferLoss40(t *testing.T) {
 	transfer(t, randomPayload(2<<20, 4), 4, pipeParams{loss: 0.40, minLat: 500 * time.Microsecond})
 }
 
-// TestTransferAdversarial combines loss, reordering, duplication, and jitter —
-// the property that received == sent must hold under all of them at once.
 func TestTransferAdversarial(t *testing.T) {
 	p := pipeParams{
 		loss:    0.30,
@@ -102,8 +95,6 @@ func TestTransferAdversarial(t *testing.T) {
 	transfer(t, randomPayload(2<<20, 5), 5, p)
 }
 
-// TestTransferProperty sweeps random seeds and impairment levels; each must
-// deliver the exact bytes. This is the core correctness guarantee for phase 1.
 func TestTransferProperty(t *testing.T) {
 	if testing.Short() {
 		t.Skip("property sweep skipped in -short")
@@ -124,8 +115,6 @@ func TestTransferProperty(t *testing.T) {
 	}
 }
 
-// TestOrderedNoDuplicates verifies the reorder buffer delivers a recognizable
-// sequence exactly once and in order, even with heavy reordering and dup.
 func TestOrderedNoDuplicates(t *testing.T) {
 	const n = 50000
 	payload := make([]byte, n*4)
@@ -177,15 +166,14 @@ func TestReadDeadline(t *testing.T) {
 }
 
 func TestWriteAfterCloseFails(t *testing.T) {
-	endA, _ := newLossyPipe(8, pipeParams{loss: 1.0}) // everything drops
+	endA, _ := newLossyPipe(8, pipeParams{loss: 1.0})
 	c := NewConn(endA, fastConfig())
-	// Close blocks until FIN acked; with total loss that never happens, so run
-	// it in the background and instead assert Write rejects once sndFin is set.
+
 	go c.Close()
-	// Give Close a moment to set sndFin.
+
 	time.Sleep(20 * time.Millisecond)
 	if _, err := c.Write([]byte("late")); err == nil {
 		t.Fatal("expected Write after Close to fail")
 	}
-	c.teardown(nil) // unblock the background Close
+	c.teardown(nil)
 }

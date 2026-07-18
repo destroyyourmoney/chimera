@@ -6,12 +6,6 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-/**
- * Registers the `chimera/vpn` MethodChannel (see app/lib/vpn_backend.dart's
- * AndroidVpnServiceBackend) and handles the one Android-specific step Dart
- * can't do itself: requesting VpnService consent via
- * VpnService.prepare()/startActivityForResult.
- */
 class MainActivity : FlutterActivity() {
     private val channelName = "chimera/vpn"
     private val vpnPrepareRequestCode = 0x43
@@ -27,9 +21,9 @@ class MainActivity : FlutterActivity() {
                     val args = call.arguments as? Map<String, Any?> ?: emptyMap()
                     val consent = VpnService.prepare(this)
                     if (consent != null) {
-                        // Not yet granted -- stash the request and resume it
-                        // from onActivityResult once the user responds to
-                        // the system consent dialog.
+                        
+                        
+                        
                         pendingStart = args
                         startActivityForResult(consent, vpnPrepareRequestCode)
                     } else {

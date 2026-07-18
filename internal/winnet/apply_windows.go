@@ -11,8 +11,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Apply executes the generated networking plan with PowerShell. It requires an
-// elevated process. When dryRun is true, it only prints the script.
 func Apply(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error {
 	script, err := PowerShell(cfg)
 	if err != nil {
@@ -38,7 +36,6 @@ func Apply(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error {
 	return nil
 }
 
-// Restore removes the CHIMERA-owned Windows route/DNS setup.
 func Restore(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error {
 	script, err := RestorePowerShell(cfg)
 	if err != nil {
@@ -64,7 +61,6 @@ func Restore(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error 
 	return nil
 }
 
-// Check verifies the CHIMERA-owned Windows route/DNS setup.
 func Check(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error {
 	script, err := CheckPowerShell(cfg)
 	if err != nil {
@@ -85,7 +81,6 @@ func Check(ctx context.Context, cfg Config, dryRun bool, out io.Writer) error {
 	return nil
 }
 
-// Elevate re-runs the current command through the Windows UAC prompt.
 func Elevate(ctx context.Context, exe string, args []string, dryRun bool, out io.Writer) error {
 	script, err := ElevatePowerShell(exe, args)
 	if err != nil {
@@ -106,8 +101,6 @@ func Elevate(ctx context.Context, exe string, args []string, dryRun bool, out io
 	return nil
 }
 
-// IsElevated reports whether the current process is running as a member of the
-// built-in Administrators group.
 func IsElevated() (bool, error) {
 	adminSID, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {

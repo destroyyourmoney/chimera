@@ -83,8 +83,6 @@ func TestAdminResetDevicesRoute(t *testing.T) {
 		t.Fatalf("expected removed_count=2, got %+v", resp)
 	}
 
-	// The removed device's short ID must be instantly revoked, not just
-	// deleted from the devices table.
 	entries, _, err := revocations.Since(0)
 	if err != nil {
 		t.Fatalf("Since: %v", err)

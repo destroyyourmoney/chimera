@@ -46,10 +46,6 @@ func TestChimeraParseLink_Malformed(t *testing.T) {
 	}
 }
 
-// TestChimeraTunnelLifecycle drives the full handle lifecycle against an
-// unreachable server: Connect must fail cleanly (not panic, non-empty error),
-// StateJSON must stay well-formed, and FreeHandle must be safe to call once
-// -- and a second time (double free) must not panic either.
 func TestChimeraTunnelLifecycle(t *testing.T) {
 	envOut := ChimeraNewTunnelFromLink(cString(testLinkURI()))
 	defer ChimeraFreeString(envOut)
@@ -76,15 +72,12 @@ func TestChimeraTunnelLifecycle(t *testing.T) {
 		t.Errorf("state before Connect = %v, want disconnected", snap["state"])
 	}
 
-	// 203.0.113.7 is TEST-NET-3 (RFC 5737): guaranteed unreachable, so
-	// Connect must fail without ever touching a real network.
 	connErr := ChimeraConnect(cLonglong(handle))
 	defer ChimeraFreeString(connErr)
 	if cGoString(connErr) == "" {
 		t.Fatal("expected Connect to an unreachable test-net address to fail")
 	}
 
-	// Must not panic, whether the handle is valid or already gone.
 	ChimeraFreeHandle(cLonglong(handle))
 	ChimeraFreeHandle(cLonglong(handle))
 }
@@ -98,7 +91,7 @@ func TestChimeraUnknownHandle_DoesNotPanic(t *testing.T) {
 		t.Error("expected a default state JSON for an unknown handle")
 	}
 
-	ChimeraStop(cLonglong(bogus)) // must not panic
+	ChimeraStop(cLonglong(bogus))
 
 	errOut := ChimeraConnect(cLonglong(bogus))
 	defer ChimeraFreeString(errOut)

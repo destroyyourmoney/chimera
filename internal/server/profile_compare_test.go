@@ -2,46 +2,6 @@
 
 package server_test
 
-// This file closes the last unmeasured Этап 2 MVP acceptance criterion
-// (ROADMAP.md "Профиль сессии близок к прямому HTTPS на steal-host; вложенный
-// CH не виден" -- "session profile close to direct HTTPS to the steal-host;
-// nested ClientHello not visible"). Until now that line was only a logical
-// inference from the architecture (authorized session = real TLS 1.3
-// terminated by internal/reality.ServerWrap); it had never actually been
-// measured on the wire.
-//
-// What this test does, concretely:
-//
-//  1. Stands up a REAL TLS 1.3 steal-host stand-in (crypto/tls.Listen, a
-//     self-signed cert, a tiny fixed HTTP/1.1 response) -- not the plaintext
-//     fakeSteal used by the rest of this package's tests.
-//  2. Runs the real CHIMERA server (server.Serve, chimera_utls build so the
-//     authorized path takes internal/reality.ServerWrap -- a genuine TLS 1.3
-//     handshake) pointed at that steal-host.
-//  3. Flow A ("chimera"): a real carrier client authenticates, then issues
-//     CmdConnect back to the SAME steal-host address. Over the resulting
-//     tunnel it runs a SECOND, independent TLS 1.3 handshake (crypto/tls)
-//     straight through to the steal-host and does a small HTTP GET/response
-//     exchange -- i.e. this deliberately performs a nested ClientHello
-//     (TLS-in-TLS), the exact scenario Этап 2's title ("защита от
-//     TLS-in-TLS") worries about, so the capture can prove whether it is
-//     visible on the wire or not.
-//  4. Flow B ("direct"): a plain crypto/tls.Dial straight to the same
-//     steal-host stand-in, same GET/response exchange, no CHIMERA involved.
-//  5. Both flows are captured at the wire (raw bytes + timestamps, both
-//     directions) at the same vantage point: the TCP hop between the client
-//     and whatever entity occupies the "steal-host" position on that wire
-//     (the relay's far-side connection to the real CHIMERA server for Flow
-//     A, or the client's direct TCP connection for Flow B -- see
-//     TestSessionStartupByteCount above for the same relay-capture
-//     technique this reuses).
-//  6. The capture is parsed at the TLS record layer (record headers are
-//     never encrypted) to get record-type sequence/sizes, Shannon entropy of
-//     application-data payloads, and inter-write timing -- and to positively
-//     check for the literal ClientHello byte-signature
-//     (0x16 0x03 [0-3] .. 0x01 at offset 5, i.e. vision.Classify's own
-//     detector) anywhere in the stream past the legitimate outer handshake.
-
 import (
 	"bufio"
 	"crypto/ecdsa"
@@ -63,8 +23,6 @@ import (
 	"chimera/internal/keys"
 )
 
-// ---- steal-host stand-in: a REAL TLS 1.3 server, not the plaintext fakeSteal ----
-
 const stealHTTPBody = "<html><body>chimera-profile-compare steal-host stand-in</body></html>"
 
 func stealHTTPResponse() []byte {
@@ -74,9 +32,6 @@ func stealHTTPResponse() []byte {
 		len(body), body))
 }
 
-// selfSignedTLSCert builds a minimal self-signed TLS 1.3 certificate for host,
-// good enough for crypto/tls.Listen (client side dials with InsecureSkipVerify,
-// same posture as the real steal-host stand-ins elsewhere in this codebase).
 func selfSignedTLSCert(t *testing.T, host string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -103,9 +58,6 @@ func selfSignedTLSCert(t *testing.T, host string) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// realTLSStealHost stands up a genuine TLS 1.3 HTTPS server: real ServerHello,
-// real Finished, a small fixed HTTP/1.1 response. This is the ground truth
-// both flows below are measured against.
 func realTLSStealHost(t *testing.T) (addr string, stop func()) {
 	t.Helper()
 	cert := selfSignedTLSCert(t, "127.0.0.1")
@@ -127,7 +79,7 @@ func realTLSStealHost(t *testing.T) (addr string, stop func()) {
 			go func(c net.Conn) {
 				defer c.Close()
 				br := bufio.NewReader(c)
-				// Read (and discard) the request line + headers up to the blank line.
+
 				for {
 					line, err := br.ReadString('\n')
 					if err != nil || line == "\r\n" || line == "\n" {
@@ -141,11 +93,9 @@ func realTLSStealHost(t *testing.T) (addr string, stop func()) {
 	return tcpLn.Addr().String(), func() { _ = tlsLn.Close() }
 }
 
-// ---- wire capture: raw bytes + timestamps, both directions ----
-
 type wireEvent struct {
 	t    time.Time
-	dir  byte // 'W' = client -> wire (tx), 'R' = wire -> client (rx)
+	dir  byte
 	size int
 }
 
@@ -167,9 +117,6 @@ func (w *wireCapture) record(dir byte, p []byte) {
 	}
 }
 
-// capturingConn wraps a net.Conn, logging every Read/Write with a timestamp
-// and a copy of the bytes, so the exact wire content and cadence can be
-// reconstructed after the fact.
 type capturingConn struct {
 	net.Conn
 	cap *wireCapture
@@ -191,8 +138,6 @@ func (c *capturingConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// ---- TLS record-layer parsing (headers are never encrypted) ----
-
 type tlsRecord struct {
 	typ    byte
 	ver    uint16
@@ -207,7 +152,7 @@ func parseRecords(stream []byte) []tlsRecord {
 		ver := uint16(stream[i+1])<<8 | uint16(stream[i+2])
 		length := int(stream[i+3])<<8 | int(stream[i+4])
 		if i+5+length > len(stream) {
-			break // incomplete trailing record (capture ended mid-record)
+			break
 		}
 		out = append(out, tlsRecord{typ, ver, length})
 		i += 5 + length
@@ -215,12 +160,6 @@ func parseRecords(stream []byte) []tlsRecord {
 	return out
 }
 
-// appDataPayloads returns the concatenation of every type-0x17 (application
-// data) record body in stream. At the TLS 1.3 record layer this covers both
-// the encrypted post-ServerHello handshake messages (EncryptedExtensions,
-// Certificate, CertificateVerify, Finished -- all opaque-typed 0x17 on the
-// wire per RFC 8446) and true post-handshake application data: all of it is
-// AEAD ciphertext and should be statistically indistinguishable from random.
 func appDataPayloads(stream []byte) []byte {
 	var out []byte
 	i := 0
@@ -238,7 +177,6 @@ func appDataPayloads(stream []byte) []byte {
 	return out
 }
 
-// shannonEntropy returns the Shannon entropy of b in bits/byte (0..8).
 func shannonEntropy(b []byte) float64 {
 	if len(b) == 0 {
 		return 0
@@ -259,10 +197,6 @@ func shannonEntropy(b []byte) float64 {
 	return h
 }
 
-// clientHelloSigMatches reports offsets where stream matches the exact
-// heuristic internal/vision.Classify uses to detect an embedded ClientHello:
-// content-type 0x16, legacy_record_version 0x0301-0x0303, handshake_type
-// 0x01 (ClientHello) at byte offset 5 relative to the match start.
 func clientHelloSigMatches(stream []byte) []int {
 	var hits []int
 	for i := 0; i+6 <= len(stream); i++ {
@@ -273,11 +207,6 @@ func clientHelloSigMatches(stream []byte) []int {
 	return hits
 }
 
-// nonHandshakeTail reports whether, once the record stream moves past the
-// initial plaintext-typed handshake/CCS records (0x16, 0x14), any further
-// 0x16-typed (Handshake) record appears. A real second cleartext handshake
-// spliced onto the wire -- as opposed to one safely wrapped as ciphertext
-// inside outer application-data records -- would show up here.
 func recordTypeSeq(recs []tlsRecord) []byte {
 	seq := make([]byte, len(recs))
 	for i, r := range recs {
@@ -301,9 +230,6 @@ func handshakeRecordsAfterFirstAppData(recs []tlsRecord) int {
 	return n
 }
 
-// ---- flow runner: performs one HTTP GET/response exchange over conn, whose
-// wire bytes are ALREADY being captured by capturingConn underneath ----
-
 func doHTTPSExchange(t *testing.T, conn net.Conn, host string) {
 	t.Helper()
 	tlsConn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true})
@@ -324,7 +250,6 @@ func doHTTPSExchange(t *testing.T, conn net.Conn, host string) {
 	}
 }
 
-// profileStats summarizes one flow's captured wire bytes for reporting.
 type profileStats struct {
 	name         string
 	txBytes      int
@@ -333,9 +258,9 @@ type profileStats struct {
 	rxReads      []int
 	txRecordSeq  []byte
 	rxRecordSeq  []byte
-	entropy      float64 // Shannon entropy (bits/byte) of app-data payloads, both directions
-	nestedCHHits int      // literal ClientHello-signature matches past offset 0 in tx
-	badHandshake int      // 0x16 records after app-data has begun (tx+rx)
+	entropy      float64
+	nestedCHHits int
+	badHandshake int
 	gapsMs       []float64
 }
 
@@ -348,21 +273,18 @@ func summarize(name string, w *wireCapture) profileStats {
 
 	appData := append(append([]byte(nil), appDataPayloads(w.txStream)...), appDataPayloads(w.rxStream)...)
 
-	// Nested-ClientHello signature check: the legitimate outer ClientHello is
-	// expected at tx offset 0. Anything else, anywhere in tx or rx, is a hit.
 	hits := 0
 	for _, off := range clientHelloSigMatches(w.txStream) {
 		if off != 0 {
 			hits++
 		}
 	}
-	hits += len(clientHelloSigMatches(w.rxStream)) // rx never legitimately starts with a ClientHello
+	hits += len(clientHelloSigMatches(w.rxStream))
 
 	bad := handshakeRecordsAfterFirstAppData(txRecs) + handshakeRecordsAfterFirstAppData(rxRecs)
 
 	sorted := append([]wireEvent(nil), w.events...)
-	// events already appended in call order per connection; merge is already
-	// chronological since both directions share the same wall clock.
+
 	var gaps []float64
 	for i := 1; i < len(sorted); i++ {
 		gaps = append(gaps, sorted[i].t.Sub(sorted[i-1].t).Seconds()*1000)
@@ -414,10 +336,6 @@ func (s profileStats) log(t *testing.T) {
 	}
 }
 
-// TestSessionProfileVsDirectHTTPS is the real measurement behind ROADMAP.md's
-// Этап 2 acceptance line "Профиль сессии близок к прямому HTTPS на
-// steal-host; вложенный CH не виден". See the file-level doc comment above
-// for the full methodology.
 func TestSessionProfileVsDirectHTTPS(t *testing.T) {
 	priv, pub, err := keys.GenerateX25519()
 	if err != nil {
@@ -436,8 +354,6 @@ func TestSessionProfileVsDirectHTTPS(t *testing.T) {
 
 	srvAddr := startServer(t, priv, "aabbccdd", stealAddr)
 
-	// ---- Flow A: CHIMERA authorized session, CONNECT back to the steal-host,
-	// then a real (nested) TLS handshake + HTTP GET over the tunnel ----
 	chimeraCap := &wireCapture{}
 	{
 		serverConn, err := net.DialTimeout("tcp", srvAddr, 5*time.Second)
@@ -471,11 +387,10 @@ func TestSessionProfileVsDirectHTTPS(t *testing.T) {
 		}
 		defer conn.Close()
 		doHTTPSExchange(t, conn, stealHost)
-		// Give the relay goroutines a moment to flush the tail of the capture.
+
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// ---- Flow B: direct TLS straight to the same steal-host, no CHIMERA ----
 	directCap := &wireCapture{}
 	{
 		raw, err := net.DialTimeout("tcp", stealAddr, 5*time.Second)
@@ -496,9 +411,6 @@ func TestSessionProfileVsDirectHTTPS(t *testing.T) {
 	entropyDelta := chimeraStats.entropy - directStats.entropy
 	t.Logf("delta: total_bytes=%+d entropy=%+.4f bits/byte", byteDelta, entropyDelta)
 
-	// --- correctness checks ---
-
-	// 1. No literal embedded-ClientHello signature anywhere it shouldn't be.
 	if chimeraStats.nestedCHHits != 0 {
 		t.Errorf("CHIMERA flow: found %d ClientHello-signature matches outside the legitimate outer handshake -- "+
 			"nested ClientHello IS visible on the wire (claim does NOT hold)", chimeraStats.nestedCHHits)
@@ -507,21 +419,12 @@ func TestSessionProfileVsDirectHTTPS(t *testing.T) {
 		t.Errorf("direct flow: unexpected ClientHello-signature matches (%d) -- baseline itself is suspect", directStats.nestedCHHits)
 	}
 
-	// 2. No cleartext-typed (0x16) handshake record ever appears after the
-	// record stream has moved into application-data territory, in either
-	// direction, for the CHIMERA flow: the inner (nested) TLS handshake to
-	// the steal-host must be fully wrapped as opaque outer application data,
-	// never spliced onto the wire as its own top-level TLS record.
 	if chimeraStats.badHandshake != 0 {
 		t.Errorf("CHIMERA flow: %d handshake(0x16) records appeared after application data began -- "+
 			"the inner handshake is leaking as its own top-level TLS record, not hidden inside outer ciphertext",
 			chimeraStats.badHandshake)
 	}
 
-	// 3. Application-data payload entropy must look like ciphertext (close to
-	// the 8 bits/byte maximum for a byte alphabet), for both flows -- this is
-	// the quantitative form of "no discernible structure" for a passive DPI
-	// looking at entropy alone.
 	const minEntropy = 7.5
 	if chimeraStats.entropy < minEntropy {
 		t.Errorf("CHIMERA flow app-data entropy = %.4f bits/byte, want >= %.2f (ciphertext-like)", chimeraStats.entropy, minEntropy)

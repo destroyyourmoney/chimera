@@ -6,13 +6,6 @@ import (
 	"testing"
 )
 
-// TestEncoderNeverMisRecoversUnderAdaptiveLoss is a regression guard for a bug
-// where SetLoss changed the group size mid-group: the parity advertised the new
-// size while it had folded a different number of blocks, so the decoder XORed
-// the parity against the wrong survivor count and reconstructed garbage. It runs
-// a long stream with frequent SetLoss (as rudp and the QUIC UDP-proxy path both
-// do) over a lossy/reordering/duplicating wire and asserts every payload the
-// decoder yields — live or recovered — matches the original for its seq.
 func TestEncoderNeverMisRecoversUnderAdaptiveLoss(t *testing.T) {
 	rnd := rand.New(rand.NewSource(7))
 	enc := NewEncoder(0.2)
@@ -56,7 +49,7 @@ func TestEncoderNeverMisRecoversUnderAdaptiveLoss(t *testing.T) {
 
 	for seq := uint32(0); seq < total; seq++ {
 		if seq%200 == 0 {
-			enc.SetLoss(0.1 + 0.3*rnd.Float64()) // frequent mid-stream adaptation
+			enc.SetLoss(0.1 + 0.3*rnd.Float64())
 		}
 		p := mkPayload(seq)
 		orig[seq] = p
@@ -65,14 +58,14 @@ func TestEncoderNeverMisRecoversUnderAdaptiveLoss(t *testing.T) {
 			if f == nil {
 				continue
 			}
-			if rnd.Float64() < 0.2 { // drop on the wire
+			if rnd.Float64() < 0.2 {
 				continue
 			}
 			wire = append(wire, append([]byte(nil), f...))
-			if rnd.Float64() < 0.1 { // duplicate
+			if rnd.Float64() < 0.1 {
 				wire = append(wire, append([]byte(nil), f...))
 			}
-			if len(wire) > 16 { // flush a shuffled batch → reordering
+			if len(wire) > 16 {
 				rnd.Shuffle(len(wire), func(i, j int) { wire[i], wire[j] = wire[j], wire[i] })
 				for _, w := range wire {
 					deliver(w)

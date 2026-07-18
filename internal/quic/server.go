@@ -26,12 +26,6 @@ import (
 
 const authReadTimeout = 10 * time.Second
 
-// Run starts the QUIC carrier listener and serves connections until ctx is
-// cancelled. Registered as carrier.QUICServe.
-//
-// Unauthenticated HTTP/3 probers are served through a best-effort H3 reverse
-// proxy to cfg.StealHost. Authenticated CHIMERA clients still use the first
-// bidirectional stream as the carrier preface.
 func Run(ctx context.Context, cfg carrier.QUICServerConfig) error {
 	priv, err := keys.DecodePrivate(cfg.PrivB64)
 	if err != nil {
@@ -59,8 +53,6 @@ func Run(ctx context.Context, cfg carrier.QUICServerConfig) error {
 	return serveListenerWithFallback(ctx, ln, priv, serverPub, allowed, cfg.StealHost)
 }
 
-// serveListener runs the accept loop on an already-open listener until ctx is
-// cancelled. Split out so tests can inject a listener bound to an ephemeral port.
 func serveListener(ctx context.Context, ln quicListener, priv *ecdh.PrivateKey, serverPub []byte, allowed carrier.Allowlist) error {
 	return serveListenerWithFallback(ctx, ln, priv, serverPub, allowed, "")
 }
@@ -84,9 +76,6 @@ func serveListenerWithFallback(ctx context.Context, ln quicListener, priv *ecdh.
 	}
 }
 
-// serveConn accepts streams on one QUIC connection; each stream is an independent
-// authenticated tunnel request. It also starts the datagram dispatch loop for
-// any UDP associations opened via CmdUDPAssoc streams.
 func serveConn(ctx context.Context, conn *quic.Conn, priv *ecdh.PrivateKey, serverPub []byte, allowed carrier.Allowlist, stealHost string) {
 	if stealHost != "" {
 		if serveH3ProbeIfPresent(ctx, conn, stealHost) {
@@ -96,22 +85,16 @@ func serveConn(ctx context.Context, conn *quic.Conn, priv *ecdh.PrivateKey, serv
 	defer conn.CloseWithError(0, "")
 	mux := newDatagramMux(ctx, conn)
 	defer mux.Close()
-	// The datagram dispatch loop starts lazily on the first CmdUDPAssoc (see
-	// mux.ensureDispatch): a connection used for the rudp bulk sub-mode must
-	// leave the datagram channel for rudp, the sole ReceiveDatagram consumer.
+
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
-			return // connection closed or context done
+			return
 		}
 		go serveStream(stream, priv, serverPub, allowed, stealHost, mux)
 	}
 }
 
-// serveH3ProbeIfPresent gives ordinary HTTP/3 clients a real-looking site on
-// UDP/443 without delaying CHIMERA clients for long. http3.Transport opens a
-// client control stream before request streams, while CHIMERA opens only a
-// bidirectional auth stream, so a short uni-stream probe cleanly separates them.
 func serveH3ProbeIfPresent(ctx context.Context, conn *quic.Conn, stealHost string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	firstUni, err := conn.AcceptUniStream(probeCtx)
@@ -199,13 +182,6 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-// serveStream authenticates the preface, then runs the inner tunnel protocol and
-// performs egress — the same shape as the TCP carrier's serveTunnel.
-//
-// On auth failure, if stealHost is configured, the stream bytes are relayed to
-// stealHost over a plain TCP connection. This provides the QUIC analogue of the
-// TCP splice: an active prober sees the server contact the steal-host, making
-// CHIMERA indistinguishable from a transparent QUIC proxy/relay.
 func serveStream(stream *quic.Stream, priv *ecdh.PrivateKey, serverPub []byte, allowed carrier.Allowlist, stealHost string, mux *datagramMux) {
 	defer stream.Close()
 
@@ -236,11 +212,6 @@ func serveStream(stream *quic.Stream, priv *ecdh.PrivateKey, serverPub []byte, a
 	serveTunnel(stream, tunnel.ServerSession(ss), mux)
 }
 
-// spliceToStealHost relays the stream (including the already-read preface) to
-// stealHost over a plain TCP connection when authentication fails. From the
-// perspective of a passive observer, the CHIMERA endpoint contacts the steal-host
-// on every QUIC stream, making it indistinguishable from a transparent relay.
-// If stealHost is empty or unreachable the stream is silently dropped.
 func spliceToStealHost(stream io.ReadWriter, preface []byte, stealHost string) {
 	if stealHost == "" {
 		return
@@ -251,7 +222,7 @@ func spliceToStealHost(stream io.ReadWriter, preface []byte, stealHost string) {
 		return
 	}
 	defer backend.Close()
-	// Forward the already-read preface bytes first, then relay bidirectionally.
+
 	if _, err := backend.Write(preface); err != nil {
 		return
 	}
@@ -261,10 +232,6 @@ func spliceToStealHost(stream io.ReadWriter, preface []byte, stealHost string) {
 	<-done
 }
 
-// serveTunnel reads one inner request from the authenticated stream and performs
-// egress. Mirrors server.serveTunnel for the QUIC transport.
-// Vision-splicing: relay payload is classified and relayed via vision.Splice.
-// CmdUDPAssoc: registers a UDP socket in the datagram mux for QUIC DATAGRAM relay.
 func serveTunnel(rw io.ReadWriteCloser, sess *tunnel.Session, mux *datagramMux) {
 	cmd, host, port, err := sess.ReadRequest(rw)
 	if err != nil {
@@ -287,7 +254,7 @@ func serveTunnel(rw io.ReadWriteCloser, sess *tunnel.Session, mux *datagramMux) 
 	case tunnel.CmdConnectRUDP:
 		serveRUDPConnect(mux.conn, sess, rw, host, port)
 	case tunnel.CmdUDPAssoc:
-		mux.ensureDispatch() // first association: start the datagram dispatch loop
+		mux.ensureDispatch()
 		addr := net.JoinHostPort(host, strconv.Itoa(int(port)))
 		assocID, err := mux.Register(context.Background(), addr)
 		if err != nil {
@@ -299,6 +266,6 @@ func serveTunnel(rw io.ReadWriteCloser, sess *tunnel.Session, mux *datagramMux) 
 			return
 		}
 		slog.Debug("udp assoc registered", "target", addr, "assoc_id", assocID)
-		// Stream stays open as long as the association is active; close deregisters it.
+
 	}
 }

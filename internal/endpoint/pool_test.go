@@ -9,13 +9,10 @@ import (
 	"chimera/internal/carrier"
 )
 
-// fakeConn is a no-op net.Conn for dial results.
 type fakeConn struct{ net.Conn }
 
 func (fakeConn) Close() error { return nil }
 
-// newTestPool builds a Pool with controllable clock and a dial func driven by
-// per-server behaviour.
 func newTestPool(t *testing.T, servers []string, behave func(server string) error) (*Pool, *time.Time) {
 	t.Helper()
 	cfgs := make([]carrier.Config, len(servers))
@@ -77,7 +74,6 @@ func TestBackoffAndAutoRecovery(t *testing.T) {
 		return nil
 	})
 
-	// First attempt fails -> a backed off ~baseBackoff.
 	if _, err := p.DialConnect("h", 1); err == nil {
 		t.Fatal("expected failure while a is down")
 	}
@@ -85,7 +81,6 @@ func TestBackoffAndAutoRecovery(t *testing.T) {
 		t.Fatal("a should be backed off")
 	}
 
-	// Endpoint recovers; advance the clock past the backoff window.
 	down["a"] = false
 	*now = now.Add(baseBackoff + time.Second)
 	conn, err := p.DialConnect("h", 1)
@@ -110,13 +105,13 @@ func TestExponentialBackoffGrows(t *testing.T) {
 			t.Fatalf("backoff did not grow: attempt %d window %v <= prev %v", i, window, prev)
 		}
 		prev = window
-		// Advance past current backoff so the next dial actually runs.
+
 		*now = now.Add(window + time.Second)
 	}
 }
 
 func TestPrefersLowerLatency(t *testing.T) {
-	// Both succeed; dial latency is simulated by advancing the clock inside dial.
+
 	p, now := newTestPool(t, []string{"slow", "fast"}, nil)
 	p.dial = func(c carrier.Config, _ string, _ uint16) (net.Conn, error) {
 		if c.Server == "slow" {
@@ -126,13 +121,13 @@ func TestPrefersLowerLatency(t *testing.T) {
 		}
 		return fakeConn{}, nil
 	}
-	// Seed both endpoints' EWMA by dialing each once directly.
+
 	for _, e := range p.eps {
 		start := *now
 		_, _ = p.dial(e.cfg, "h", 1)
 		p.markOK(e, now.Sub(start))
 	}
-	// The fast endpoint must sort first.
+
 	if got := p.candidates()[0].cfg.Server; got != "fast" {
 		t.Fatalf("expected 'fast' preferred by latency, got %q", got)
 	}

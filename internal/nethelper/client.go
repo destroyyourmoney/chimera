@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-// Call dials 127.0.0.1:Port, sends req as one line of JSON, reads back one
-// line of JSON as the Response, and closes the connection. Used by the Go
-// side (cmd/chimera-helper's own `status` subcommand, tests); the Dart tray
-// app has its own small client (app/lib/nethelper_client.dart) speaking the
-// same wire format since it can't import this package.
 func Call(req Request, timeout time.Duration) (Response, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", Port)
 	conn, err := net.DialTimeout("tcp", addr, timeout)

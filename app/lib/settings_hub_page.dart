@@ -1,8 +1,3 @@
-// Settings hub (Mullvad-style): a small gear icon on Home opens this list of
-// rows -- VPN settings, User interface settings, Split tunneling, Support,
-// App info -- each pushing its own sub-page, plus a bottom
-// "Disconnect & quit" / "Quit" action. Replaces the old flat
-// Settings/Split-tunneling nav rows on Home.
 import 'package:flutter/material.dart';
 
 import 'app_info.dart';
@@ -29,20 +24,25 @@ class SettingsHubPage extends StatelessWidget {
     required this.onDisconnectAndQuit,
     this.state,
     this.downSamples = const [],
+    this.onSetMinimizeToTray,
+    this.embedded = false,
   });
+
+  final bool embedded;
 
   final ChimeraSettings settings;
   final bool busy;
   final bool isConnected;
   final Future<void> Function() onPersist;
   final ValueChanged<bool> onToggleAutostart;
-  final Future<bool> Function(NetworkProtectionMode mode) onSetNetworkProtection;
+  final Future<bool> Function(NetworkProtectionMode mode)
+  onSetNetworkProtection;
   final Future<void> Function(List<String> dns) onSetCustomDns;
   final String Function() buildDiagnosticsReport;
   final VoidCallback onDisconnectAndQuit;
 
-  /// Passed through to Support's live throughput/endpoint-health section
-  /// (moved off Home in the redesign -- see support_page.dart).
+  final Future<void> Function(bool value)? onSetMinimizeToTray;
+
   final ChimeraState? state;
   final List<double> downSamples;
 
@@ -58,112 +58,145 @@ class SettingsHubPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<ChimeraTokens>()!;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                children: [
-                  _hubRow(
-                    context,
-                    tokens,
-                    title: 'VPN settings',
-                    subtitle: _networkProtectionLabel(
-                      settings.networkProtection,
-                    ),
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => VpnSettingsPage(
-                          mode: settings.networkProtection,
-                          customDns: settings.customDns,
-                          busy: busy,
-                          hasServers: settings.servers.isNotEmpty,
-                          onSetMode: onSetNetworkProtection,
-                          onSetCustomDns: onSetCustomDns,
-                        ),
+    final content = SafeArea(
+      child: Column(
+        children: [
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              children: [
+                _hubRow(
+                  context,
+                  tokens,
+                  title: 'VPN settings',
+                  subtitle: _networkProtectionLabel(settings.networkProtection),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => VpnSettingsPage(
+                        mode: settings.networkProtection,
+                        customDns: settings.customDns,
+                        busy: busy,
+                        hasServers: settings.servers.isNotEmpty,
+                        onSetMode: onSetNetworkProtection,
+                        onSetCustomDns: onSetCustomDns,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  _hubRow(
-                    context,
-                    tokens,
-                    title: 'User interface settings',
-                    subtitle: settings.autostart
-                        ? 'Launch at login: on'
-                        : 'Launch at login: off',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => UiSettingsPage(
-                          autostart: settings.autostart,
-                          busy: busy,
-                          onToggleAutostart: onToggleAutostart,
-                        ),
+                ),
+                const SizedBox(height: 8),
+                _hubRow(
+                  context,
+                  tokens,
+                  title: 'User interface settings',
+                  subtitle: settings.autostart
+                      ? 'Launch at login: on'
+                      : 'Launch at login: off',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => UiSettingsPage(
+                        autostart: settings.autostart,
+                        busy: busy,
+                        onToggleAutostart: onToggleAutostart,
                       ),
                     ),
                   ),
+                ),
+                if (onSetMinimizeToTray != null) ...[
                   const SizedBox(height: 16),
-                  _hubRow(
-                    context,
-                    tokens,
-                    title: 'Split tunneling',
-                    subtitle: settings.splitTunnel.enabled
-                        ? '${settings.splitTunnel.apps.length} app(s), '
-                              '${settings.splitTunnel.mode == SplitTunnelMode.include ? "include" : "exclude"}'
-                        : 'Off',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => SplitTunnelPage(
-                          settings: settings.splitTunnel,
-                          onChanged: onPersist,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _hubRow(
-                    context,
-                    tokens,
-                    title: 'Support',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => SupportPage(
-                          buildReport: buildDiagnosticsReport,
-                          state: state,
-                          downSamples: downSamples,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  _hubRow(
-                    context,
-                    tokens,
-                    title: 'App info',
-                    subtitle: kAppVersion,
-                    onTap: () => Navigator.of(
-                      context,
-                    ).push(MaterialPageRoute(builder: (_) => const AppInfoPage())),
-                  ),
+                  _minimizeToTrayRow(context, tokens),
                 ],
+                const SizedBox(height: 16),
+                _hubRow(
+                  context,
+                  tokens,
+                  title: 'Split tunneling',
+                  subtitle: settings.splitTunnel.enabled
+                      ? '${settings.splitTunnel.apps.length} app(s), '
+                            '${settings.splitTunnel.mode == SplitTunnelMode.include ? "include" : "exclude"}'
+                      : 'Off',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => SplitTunnelPage(
+                        settings: settings.splitTunnel,
+                        onChanged: onPersist,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _hubRow(
+                  context,
+                  tokens,
+                  title: 'Support',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => SupportPage(
+                        buildReport: buildDiagnosticsReport,
+                        state: state,
+                        downSamples: downSamples,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _hubRow(
+                  context,
+                  tokens,
+                  title: 'App info',
+                  subtitle: kAppVersion,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const AppInfoPage()),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: onDisconnectAndQuit,
+                child: Text(isConnected ? 'Disconnect & quit' : 'Quit'),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.error,
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: onDisconnectAndQuit,
-                  child: Text(isConnected ? 'Disconnect & quit' : 'Quit'),
+          ),
+        ],
+      ),
+    );
+    if (embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: content,
+    );
+  }
+
+  Widget _minimizeToTrayRow(BuildContext context, ChimeraTokens tokens) {
+    return Material(
+      color: tokens.surface2,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Minimize to tray on close',
+                style: TextStyle(
+                  fontFamily: 'Plex Sans',
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Theme.of(context).colorScheme.onSurface,
                 ),
               ),
+            ),
+            Switch(
+              value: settings.minimizeToTray,
+              onChanged: (v) => onSetMinimizeToTray!(v),
             ),
           ],
         ),

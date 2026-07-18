@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-// runTransfer streams payload sender→receiver over the pipe and returns the
-// received bytes plus both endpoints' stats, asserting byte-exactness.
 func runTransfer(t *testing.T, payload []byte, seed int64, p pipeParams, cfg Config) (sndStats, rcvStats Stats) {
 	t.Helper()
 	endA, endB := newLossyPipe(seed, p)
@@ -39,10 +37,6 @@ func runTransfer(t *testing.T, payload []byte, seed int64, p pipeParams, cfg Con
 	return sndStats, rcvStats
 }
 
-// TestFECRecoversWithoutRetransmit checks the central phase-2 claim: at a loss
-// rate XOR FEC handles well (~10 %), the receiver reconstructs a substantial
-// number of segments locally — delivered without any retransmission RTT — while
-// the stream stays byte-exact.
 func TestFECRecoversWithoutRetransmit(t *testing.T) {
 	p := pipeParams{loss: 0.10, minLat: 400 * time.Microsecond}
 	_, rcv := runTransfer(t, randomPayload(2<<20, 21), 21, p, fastConfig())
@@ -52,9 +46,6 @@ func TestFECRecoversWithoutRetransmit(t *testing.T) {
 	t.Logf("FEC recovered %d segments without retransmission", rcv.FECRecovered)
 }
 
-// TestFECReducesRetransmissions compares the ARQ workload with and without FEC
-// at matched loss. FEC repairing erasures locally must cut retransmissions,
-// which is the whole point — fewer RTT-bound repairs under loss.
 func TestFECReducesRetransmissions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("comparison skipped in -short")
@@ -77,8 +68,6 @@ func TestFECReducesRetransmissions(t *testing.T) {
 	}
 }
 
-// TestFECByteExactHighLoss confirms correctness still holds when FEC cannot
-// cover all loss (40 %): ARQ must mop up the residual, byte-exact.
 func TestFECByteExactHighLoss(t *testing.T) {
 	p := pipeParams{loss: 0.40, dupRate: 0.05, reorder: 0.2,
 		minLat: 400 * time.Microsecond, jitter: 3 * time.Millisecond}

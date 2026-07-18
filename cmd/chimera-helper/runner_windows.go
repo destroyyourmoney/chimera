@@ -16,29 +16,14 @@ import (
 	"chimera/internal/nethelper"
 )
 
-// procRunner is nethelper.Runner backed by a chimera.exe tun child process.
-// The service that owns a procRunner runs as LocalSystem, so spawning that
-// child inherits SYSTEM's token directly -- no UAC, no re-elevation dance --
-// which is the entire reason this service exists (see main.go's doc
-// comment). Start/Stop reuse chimera.exe's existing, already-tested
-// `tun -setup-os/-setup-firewall/-setup-killswitch/-setup-restore` flags
-// (internal/winnet) instead of reimplementing any of that logic here.
 type procRunner struct {
 	mu   sync.Mutex
 	cmd  *exec.Cmd
-	done chan struct{} // closed once cmd.Wait() returns; guards against double-Wait
+	done chan struct{}
 
-	// lastServer is req.Server from the most recent Start, kept around so
-	// Stop's -setup-restore call below can pass -server too. Without it,
-	// RestorePowerShell's Config.Endpoints is empty and the endpoint /32
-	// route pins added at connect time (internal/winnet/plan.go's
-	// PowerShell, endpointRoutes loop) are never cleaned up on disconnect.
 	lastServer string
 }
 
-// chimeraExePath resolves chimera.exe as a sibling of the running
-// chimera-helper.exe -- both are installed into the same app directory by
-// scripts/build-app-windows.ps1.
 func chimeraExePath() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -51,15 +36,6 @@ func (r *procRunner) Start(req nethelper.Request) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// A new Start while one is already running is a "switch server/mode"
-	// request, OR the app's own reconnect watchdog re-engaging after a
-	// dropped tunnel WITHOUT ever calling Stop() first (chimera_service.dart's
-	// _scheduleReconnect calls _connectOnce directly, skipping _teardown).
-	// Either way, killing the old process alone is not enough: it leaves
-	// that session's routes/DNS/NRPT/firewall state applied, and the next
-	// `-setup-os` below layers a fresh config on top of it instead of a
-	// clean slate -- exactly what turned "connected" into "DNS resolves to
-	// nothing" after a reconnect. Restore before proceeding, same as Stop().
 	wasRunning := r.cmd != nil
 	prevServer := r.lastServer
 	r.stopLocked()
@@ -121,12 +97,7 @@ func (r *procRunner) Start(req nethelper.Request) error {
 		err := cmd.Wait()
 		waitErr <- err
 		close(done)
-		// Clear tracked state once the process is actually gone, but only if
-		// nothing else (a subsequent Start/Stop) has already replaced it --
-		// otherwise Running() would report true forever for a child that
-		// crashed or was killed, which is exactly the bug this fixes: the
-		// service kept telling callers "running" after chimera.exe tun had
-		// already exited.
+
 		r.mu.Lock()
 		if r.cmd == cmd {
 			r.cmd = nil
@@ -140,23 +111,16 @@ func (r *procRunner) Start(req nethelper.Request) error {
 		}
 	}()
 
-	// Give the process a moment to fail fast (missing wintun.dll, bad
-	// server/pbk rejected by the CLI's own flag validation, etc.) so Start
-	// can report a real error instead of "ok" for a tunnel that was already
-	// dead by the time the caller's next ping arrived.
 	select {
 	case err := <-waitErr:
-		// The exit-tracking goroutine will also try to clear r.cmd/r.done
-		// once it gets r.mu (which we're still holding here) -- clearing
-		// them here too makes the failure immediate and deterministic
-		// rather than depending on that goroutine winning a lock race.
+
 		r.cmd = nil
 		r.done = nil
 		return fmt.Errorf("chimera-helper: chimera.exe tun exited immediately (see %s): %w", logPath, err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	slog.Info("chimera-helper: tunnel started", "pid", cmd.Process.Pid, "mode", req.Mode, "server", req.Server)
+	slog.Info("chimera-helper: tunnel started", "pid", cmd.Process.Pid, "mode", req.Mode)
 	return nil
 }
 
@@ -165,26 +129,14 @@ func (r *procRunner) Stop() error {
 	defer r.mu.Unlock()
 	r.stopLocked()
 
-	// stopLocked kills the child rather than cancelling its context, so it
-	// never reaches its own final "idle" write in runStatusWriter -- remove
-	// the file directly so Stats()/state() don't keep reporting a stale
-	// "running" tunnel with frozen byte counts after Stop.
 	if err := os.Remove(statusFilePath()); err != nil && !os.IsNotExist(err) {
 		slog.Warn("chimera-helper: remove stale status file", "err", err)
 	}
 
-	// Unconditional cleanup pass regardless of whether a tracked process was
-	// running: guarantees routes/DNS/firewall are restored even after a
-	// service restart lost track of a previous run, or the child died
-	// without us noticing. Restore errors (e.g. the TUN adapter is already
-	// gone) are logged, not surfaced -- see nethelper.Server.Handle's doc
-	// comment on why Stop is best-effort from the caller's perspective.
 	r.restoreLocked(r.lastServer)
 	return nil
 }
 
-// restoreLocked runs `chimera.exe tun -setup-restore` to undo whatever routes
-// /DNS/NRPT/firewall state a previous session applied. Caller must hold r.mu.
 func (r *procRunner) restoreLocked(server string) {
 	exe, err := chimeraExePath()
 	if err != nil {
@@ -193,9 +145,7 @@ func (r *procRunner) restoreLocked(server string) {
 	}
 	restoreArgs := []string{"tun", "-setup-restore"}
 	if server != "" {
-		// Without -server, tunCmd's setupBase.Endpoints is empty and
-		// RestorePowerShell never removes the endpoint /32 route pins added
-		// at connect time -- see the lastServer field doc comment.
+
 		restoreArgs = append(restoreArgs, "-server", server)
 	}
 	out, err := exec.Command(exe, restoreArgs...).CombinedOutput()
@@ -204,9 +154,6 @@ func (r *procRunner) restoreLocked(server string) {
 	}
 }
 
-// stopLocked kills the tracked child, if any, and waits for its Wait()
-// goroutine to finish so a subsequent Start doesn't race with it. Caller
-// must hold r.mu.
 func (r *procRunner) stopLocked() {
 	if r.cmd == nil || r.cmd.Process == nil {
 		return
@@ -227,9 +174,6 @@ func (r *procRunner) Running() bool {
 	return r.cmd != nil
 }
 
-// tunStatus mirrors cmd/chimera/tun_on.go's tunStatus -- kept as a separate
-// definition since the two are different binaries/packages, same JSON shape
-// by convention (see -status-file's doc comment on both sides).
 type tunStatus struct {
 	State     string `json:"state"`
 	BytesUp   uint64 `json:"bytesUp"`
@@ -239,11 +183,6 @@ type tunStatus struct {
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
-// Stats reads the status file the running chimera.exe tun child writes to
-// (see statusFilePath, and this Runner's Start passing -status-file).
-// Best-effort: missing/stale/unparseable -> zero value, never an error --
-// stats are a nice-to-have display, not something a caller should have to
-// handle failing.
 func (r *procRunner) Stats() nethelper.TunnelStats {
 	data, err := os.ReadFile(statusFilePath())
 	if err != nil {
@@ -261,8 +200,6 @@ func (r *procRunner) Stats() nethelper.TunnelStats {
 	}
 }
 
-// statusFilePath: %ProgramData%, same rationale as helperLogPath (the
-// service runs as LocalSystem).
 func statusFilePath() string {
 	dir := os.Getenv("ProgramData")
 	if dir == "" {
@@ -271,9 +208,6 @@ func statusFilePath() string {
 	return filepath.Join(dir, "chimera", "tunnel-status.json")
 }
 
-// helperLogPath: %ProgramData%, not %LocalAppData% -- the service runs as
-// LocalSystem, which has its own profile distinct from any logged-in user's
-// (see token.go's doc comment for the same issue with the auth token).
 func helperLogPath() string {
 	dir := os.Getenv("ProgramData")
 	if dir == "" {

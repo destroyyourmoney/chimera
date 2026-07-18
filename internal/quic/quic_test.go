@@ -20,8 +20,6 @@ import (
 	"chimera/internal/keys"
 )
 
-// startServer brings up a QUIC carrier on an ephemeral loopback port and returns
-// its address plus the server public key (base64url). It tears down on cleanup.
 func startServer(t *testing.T) (addr, pubB64 string) {
 	t.Helper()
 	return startServerWithFallback(t, "")
@@ -51,7 +49,6 @@ func startServerWithFallback(t *testing.T, stealHost string) (addr, pubB64 strin
 	return ln.Addr().String(), pubB64
 }
 
-// startEcho starts a TCP echo server and returns its host and port.
 func startEcho(t *testing.T) (host string, port uint16) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -138,8 +135,7 @@ func TestQUICConnectRelay(t *testing.T) {
 
 func TestQUICRejectsBadAuth(t *testing.T) {
 	addr, _ := startServer(t)
-	// A public key the server has no matching private key for: auth.Open fails,
-	// the server drops the stream, and Ping must not succeed.
+
 	_, wrongPub, err := keys.GenerateX25519()
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
@@ -150,11 +146,8 @@ func TestQUICRejectsBadAuth(t *testing.T) {
 	}
 }
 
-// TestQUICFallbackToStealHost verifies that when a QUIC stream fails auth,
-// the server relays the stream bytes to the configured steal-host. The steal-host
-// is a plain TCP echo server; we expect our sent bytes to come back.
 func TestQUICFallbackToStealHost(t *testing.T) {
-	// Start a mock steal-host TCP server that echoes data back.
+
 	stealLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("steal-host listen: %v", err)
@@ -176,20 +169,19 @@ func TestQUICFallbackToStealHost(t *testing.T) {
 	stealHost := stealLn.Addr().String()
 	addr, _ := startServerWithFallback(t, stealHost)
 
-	// Connect with wrong key so auth fails → fallback fires.
 	_, wrongPub, err := keys.GenerateX25519()
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
 	cfg := carrier.Config{Server: addr, PubB64: wrongPub, SNI: "example.com", Transport: "quic"}
-	_ = Ping(cfg) // expected to fail; we care about the side-effect
+	_ = Ping(cfg)
 
 	select {
 	case data := <-received:
 		if len(data) == 0 {
 			t.Fatal("steal-host received empty data")
 		}
-		// data contains the auth preface bytes forwarded by spliceToStealHost.
+
 	case <-time.After(3 * time.Second):
 		t.Fatal("steal-host did not receive any data within 3s; fallback may not have fired")
 	}

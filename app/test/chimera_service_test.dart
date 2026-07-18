@@ -1,8 +1,3 @@
-// Tests TunnelService's connect/disconnect bookkeeping and the reconnect
-// watchdog's exponential backoff, against a FakeChimeraApi (the fast
-// FFI preflight) and a FakeNetworkProtectionController (the TUN engage/
-// disengage/status calls) instead of the real chimera.dll and chimera-helper
-// IPC.
 import 'dart:convert';
 
 import 'package:chimera_tray/chimera_bindings.dart';
@@ -45,8 +40,12 @@ class FakeChimeraApi implements ChimeraNativeApi {
   void stop(int handle) {}
 
   @override
-  String stateJSON(int handle) =>
-      jsonEncode({'state': 'connected', 'transport': 'tcp', 'bytesUp': 0, 'bytesDown': 0});
+  String stateJSON(int handle) => jsonEncode({
+    'state': 'connected',
+    'transport': 'tcp',
+    'bytesUp': 0,
+    'bytesDown': 0,
+  });
 
   @override
   String parseLink(String uri) => jsonEncode({'result': '{}', 'error': ''});
@@ -139,39 +138,49 @@ void main() {
   });
 
   group('TunnelService.connect', () {
-    test('returns the preflight error string on a failed native connect, without engaging the tunnel', () async {
-      final fake = FakeChimeraApi()..connectError = 'auth failed';
-      final controller = FakeNetworkProtectionController();
-      final service = TunnelService(bindings: fake, controller: controller);
-      final err = await service.connect(_sub, primaryServer: _primary);
-      expect(err, 'auth failed');
-      expect(fake.newTunnelCallCount, 1);
-      expect(fake.connectCallCount, 1);
-      expect(controller.engageCallCount, 0);
-      service.dispose();
-    });
+    test(
+      'returns the preflight error string on a failed native connect, without engaging the tunnel',
+      () async {
+        final fake = FakeChimeraApi()..connectError = 'auth failed';
+        final controller = FakeNetworkProtectionController();
+        final service = TunnelService(bindings: fake, controller: controller);
+        final err = await service.connect(_sub, primaryServer: _primary);
+        expect(err, 'auth failed');
+        expect(fake.newTunnelCallCount, 1);
+        expect(fake.connectCallCount, 1);
+        expect(controller.engageCallCount, 0);
+        service.dispose();
+      },
+    );
 
-    test('returns the engage error when the preflight succeeds but NetworkProtection fails', () async {
-      final fake = FakeChimeraApi();
-      final controller = FakeNetworkProtectionController()..engageError = 'helper unavailable';
-      final service = TunnelService(bindings: fake, controller: controller);
-      final err = await service.connect(_sub, primaryServer: _primary);
-      expect(err, 'helper unavailable');
-      expect(controller.engageCallCount, 1);
-      service.dispose();
-    });
+    test(
+      'returns the engage error when the preflight succeeds but NetworkProtection fails',
+      () async {
+        final fake = FakeChimeraApi();
+        final controller = FakeNetworkProtectionController()
+          ..engageError = 'helper unavailable';
+        final service = TunnelService(bindings: fake, controller: controller);
+        final err = await service.connect(_sub, primaryServer: _primary);
+        expect(err, 'helper unavailable');
+        expect(controller.engageCallCount, 1);
+        service.dispose();
+      },
+    );
 
-    test('returns null on success and records the native + engage calls', () async {
-      final fake = FakeChimeraApi();
-      final controller = FakeNetworkProtectionController();
-      final service = TunnelService(bindings: fake, controller: controller);
-      final err = await service.connect(_sub, primaryServer: _primary);
-      expect(err, isNull);
-      expect(fake.newTunnelCallCount, 1);
-      expect(fake.connectCallCount, 1);
-      expect(controller.engageCallCount, 1);
-      service.dispose();
-    });
+    test(
+      'returns null on success and records the native + engage calls',
+      () async {
+        final fake = FakeChimeraApi();
+        final controller = FakeNetworkProtectionController();
+        final service = TunnelService(bindings: fake, controller: controller);
+        final err = await service.connect(_sub, primaryServer: _primary);
+        expect(err, isNull);
+        expect(fake.newTunnelCallCount, 1);
+        expect(fake.connectCallCount, 1);
+        expect(controller.engageCallCount, 1);
+        service.dispose();
+      },
+    );
   });
 
   group('TunnelService.disconnect', () {
@@ -187,57 +196,63 @@ void main() {
   });
 
   group('TunnelService reconnect watchdog', () {
-    test('retries with exponential backoff capped at 30s while the preflight keeps failing', () {
-      fakeAsync((async) {
-        final fake = FakeChimeraApi()..connectError = 'boom';
-        final controller = FakeNetworkProtectionController();
-        final service = TunnelService(bindings: fake, controller: controller);
+    test(
+      'retries with exponential backoff capped at 30s while the preflight keeps failing',
+      () {
+        fakeAsync((async) {
+          final fake = FakeChimeraApi()..connectError = 'boom';
+          final controller = FakeNetworkProtectionController();
+          final service = TunnelService(bindings: fake, controller: controller);
 
-        service.connect(_sub, primaryServer: _primary);
-        async.flushMicrotasks();
-        expect(fake.connectCallCount, 1);
+          service.connect(_sub, primaryServer: _primary);
+          async.flushMicrotasks();
+          expect(fake.connectCallCount, 1);
 
-        async.elapse(const Duration(seconds: 2));
-        expect(fake.connectCallCount, 2); // first retry: min backoff (2s)
+          async.elapse(const Duration(seconds: 2));
+          expect(fake.connectCallCount, 2);
 
-        async.elapse(const Duration(seconds: 4));
-        expect(fake.connectCallCount, 3); // backoff doubled to 4s
+          async.elapse(const Duration(seconds: 4));
+          expect(fake.connectCallCount, 3);
 
-        async.elapse(const Duration(seconds: 8));
-        expect(fake.connectCallCount, 4); // backoff doubled to 8s
+          async.elapse(const Duration(seconds: 8));
+          expect(fake.connectCallCount, 4);
 
-        async.elapse(const Duration(seconds: 16));
-        expect(fake.connectCallCount, 5); // backoff doubled to 16s
+          async.elapse(const Duration(seconds: 16));
+          expect(fake.connectCallCount, 5);
 
-        async.elapse(const Duration(seconds: 30));
-        expect(fake.connectCallCount, 6); // capped at 30s, not 32s
+          async.elapse(const Duration(seconds: 30));
+          expect(fake.connectCallCount, 6);
 
-        async.elapse(const Duration(seconds: 30));
-        expect(fake.connectCallCount, 7); // stays capped at 30s
+          async.elapse(const Duration(seconds: 30));
+          expect(fake.connectCallCount, 7);
 
-        service.dispose();
-      });
-    });
+          service.dispose();
+        });
+      },
+    );
 
-    test('disconnect() cancels a pending reconnect and stops further retries', () {
-      fakeAsync((async) {
-        final fake = FakeChimeraApi()..connectError = 'boom';
-        final controller = FakeNetworkProtectionController();
-        final service = TunnelService(bindings: fake, controller: controller);
+    test(
+      'disconnect() cancels a pending reconnect and stops further retries',
+      () {
+        fakeAsync((async) {
+          final fake = FakeChimeraApi()..connectError = 'boom';
+          final controller = FakeNetworkProtectionController();
+          final service = TunnelService(bindings: fake, controller: controller);
 
-        service.connect(_sub, primaryServer: _primary);
-        async.flushMicrotasks();
-        expect(fake.connectCallCount, 1);
+          service.connect(_sub, primaryServer: _primary);
+          async.flushMicrotasks();
+          expect(fake.connectCallCount, 1);
 
-        service.disconnect();
-        async.flushMicrotasks();
+          service.disconnect();
+          async.flushMicrotasks();
 
-        async.elapse(const Duration(seconds: 100));
-        expect(fake.connectCallCount, 1); // no retries after user disconnect
+          async.elapse(const Duration(seconds: 100));
+          expect(fake.connectCallCount, 1);
 
-        service.dispose();
-      });
-    });
+          service.dispose();
+        });
+      },
+    );
 
     test('a fresh connect() call resets backoff to the minimum', () {
       fakeAsync((async) {
@@ -251,14 +266,12 @@ void main() {
         async.elapse(const Duration(seconds: 4));
         expect(fake.connectCallCount, 3);
 
-        // User-initiated reconnect should restart backoff at the minimum
-        // (2s), not continue from wherever the watchdog had grown to.
         service.connect(_sub, primaryServer: _primary);
         async.flushMicrotasks();
         expect(fake.connectCallCount, 4);
 
         async.elapse(const Duration(seconds: 2));
-        expect(fake.connectCallCount, 5); // min backoff again, not 8s
+        expect(fake.connectCallCount, 5);
 
         service.dispose();
       });

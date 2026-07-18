@@ -12,11 +12,10 @@ import (
 	"chimera/internal/link"
 )
 
-// fakePool records AddEndpoints/RemoveEndpoints calls.
 type fakePool struct {
 	added   []carrier.Config
 	removed []string
-	addN    int // value AddEndpoints reports as added
+	addN    int
 }
 
 func (f *fakePool) AddEndpoints(cfgs []carrier.Config) int {
@@ -73,8 +72,7 @@ func TestRotate_ProvisionErrorDoesNotShrinkPool(t *testing.T) {
 }
 
 func TestRotate_NoNewEndpointsDoesNotRemove(t *testing.T) {
-	// AddEndpoints reports 0 added (e.g. all duplicates): the burned endpoints must
-	// NOT be removed, or the pool could be emptied.
+
 	pool := &zeroAddPool{}
 	prov := &fakeProv{cfgs: []carrier.Config{{Server: "dup:443"}}}
 	if err := Rotate(context.Background(), pool, prov, []string{"old:443"}); err == nil {
@@ -91,7 +89,7 @@ func (z *zeroAddPool) AddEndpoints([]carrier.Config) int { return 0 }
 func (z *zeroAddPool) RemoveEndpoints(s []string) int    { z.removed = append(z.removed, s...); return 0 }
 
 func TestCommandProvisioner_ParsesSubscription(t *testing.T) {
-	// A command that prints a valid (unsigned) chimera subscription built via link.Build.
+
 	uri := link.Build(link.Profile{Host: "host1", Port: "443", Pbk: "AAA", Sni: "example.com"})
 	sub := "#!chimera-subscription-v1\n" + uri + "\n"
 	prov := CommandProvisioner{
